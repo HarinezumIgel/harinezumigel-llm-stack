@@ -1,0 +1,172 @@
+# Example LiteLLM Configuration
+# Copy and customize this file for your deployment
+#
+# For full configuration options, see:
+# https://docs.litellm.ai/docs/proxy/configs
+
+# ============================================================================
+# Model Deployments
+# ============================================================================
+
+model_list:
+  # Example: Mistral 7B Instruct
+  - model_name: mistral-7b
+    litellm_params:
+      # Use openai/ prefix for vLLM backends (OpenAI-compatible API)
+      model: openai/mistral-7b
+
+      # API endpoint for this model's vLLM backend
+      api_base: http://localhost:8001/v1
+
+      # API key (references environment variable)
+      api_key: os.environ/LOCAL_VLLM_API_KEY
+
+    model_info:
+      # Context window size
+      context_length: 32768
+
+      # Maximum input tokens (reserve space for output)
+      max_input_tokens: 28672
+
+      # Maximum output tokens
+      max_output_tokens: 4096
+
+      # GPU memory utilization (0.0-1.0)
+      # Higher = more memory used, potentially better performance
+      gpu_memory_utilization: 0.90
+
+      # Maximum concurrent requests
+      # Higher = better throughput, more memory usage
+      max_num_seqs: 4
+
+      # Enable prefix caching for repeated system prompts
+      enable_prefix_caching: true
+
+      # Optional: Explicit model directory name
+      # If not set, fuzzy matching is used
+      # model_dir: mistral-7b-instruct-v0.2
+
+  # Example: Qwen 2.5 Coder with tool calling
+  - model_name: qwen-coder
+    litellm_params:
+      model: openai/qwen-coder
+      api_base: http://localhost:8002/v1
+      api_key: os.environ/LOCAL_VLLM_API_KEY
+
+    model_info:
+      context_length: 32768
+      max_input_tokens: 28672
+      max_output_tokens: 4096
+      gpu_memory_utilization: 0.85
+      max_num_seqs: 2
+
+      # Explicit model directory
+      model_dir: Qwen2.5-Coder-32B-Instruct-AWQ
+
+      # Enable tool calling features
+      enable_auto_tool_choice: true
+      tool_call_parser: llama3_json
+
+      # Trust remote code (required for some models)
+      trust_remote_code: true
+
+  # Example: Large 70B model with conservative settings
+  - model_name: llama3-70b
+    litellm_params:
+      model: openai/llama3-70b
+      api_base: http://localhost:8003/v1
+      api_key: os.environ/LOCAL_VLLM_API_KEY
+
+    model_info:
+      context_length: 8192
+      max_input_tokens: 7168
+      max_output_tokens: 1024
+
+      # Lower GPU memory for large models
+      gpu_memory_utilization: 0.75
+
+      # Limit concurrency for memory management
+      max_num_seqs: 1
+
+      # Enforce eager mode (disable CUDA graphs) for stability
+      enforce_eager: true
+
+      # Optional: Specify attention backend
+      # attention_backend: FLASH_ATTN
+
+  # Example: AWQ quantized model
+  - model_name: qwen2_5_32b_awq
+    litellm_params:
+      model: openai/qwen2_5_32b_awq
+      api_base: http://localhost:8004/v1
+      api_key: os.environ/LOCAL_VLLM_API_KEY
+
+    model_info:
+      context_length: 32768
+      max_input_tokens: 28672
+      max_output_tokens: 4096
+
+      # AWQ models can use more GPU memory efficiently
+      gpu_memory_utilization: 0.95
+      max_num_seqs: 8
+
+      model_dir: Qwen2.5-32B-Instruct-AWQ
+
+      # Increase batch size for throughput
+      max_num_batched_tokens: 8192
+
+      enable_prefix_caching: true
+
+# ============================================================================
+# LiteLLM Router Settings (Optional)
+# ============================================================================
+
+# Load balancing and failover
+# router_settings:
+#   routing_strategy: least-busy
+#   num_retries: 3
+#   timeout: 600
+
+# ============================================================================
+# General Settings (Optional)
+# ============================================================================
+
+# general_settings:
+#   # Master API key for LiteLLM proxy
+#   master_key: os.environ/LITELLM_MASTER_KEY
+#
+#   # Database for tracking usage
+#   database_url: os.environ/DATABASE_URL
+#
+#   # Enable request logging
+#   set_verbose: true
+
+# ============================================================================
+# Model-Specific Notes
+# ============================================================================
+
+# Context Length Guidelines:
+#   - 8K: Small context, fast, memory-efficient
+#   - 16K: Medium context, balanced
+#   - 32K: Large context, higher memory usage
+#   - 128K: Very large context, requires significant memory
+
+# GPU Memory Utilization:
+#   - 0.70-0.80: Conservative, good for multi-model deployments
+#   - 0.85-0.90: Balanced, recommended for most cases
+#   - 0.95+: Aggressive, maximum throughput, risk of OOM
+
+# Max Num Seqs (Concurrent Requests):
+#   - 1: Lowest memory, best for very large models
+#   - 2-4: Balanced, good for most deployments
+#   - 8+: High throughput, requires sufficient GPU memory
+
+# Prefix Caching:
+#   - Enable for models with repetitive system prompts
+#   - Reduces redundant computation
+#   - Slight memory overhead
+
+# Attention Backend Options:
+#   - FLASH_ATTN: Fast, memory-efficient (recommended)
+#   - XFORMERS: Good compatibility
+#   - TORCH_SDPA: PyTorch native (fallback)
