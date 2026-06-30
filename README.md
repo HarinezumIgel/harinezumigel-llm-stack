@@ -383,26 +383,25 @@ harinezumigel-llm-stack --list
 ## Architecture
 
 ```
-┌─────────────────┐
-│    harinezumigel-llm-stack     │
-└────────┬────────┘
-         │
-         ├─────────────────────────────────────┐
-         │                                     │
-         ▼                                     ▼
-┌──────────────────┐              ┌──────────────────────┐
-│  LiteLLM Proxy   │              │   vLLM Containers    │
-│  (Host Process)  │              │   (Docker + NVIDIA)  │
-│                  │              │                      │
-│  Port: 4000      │◄─────────────┤  mistral-7b: 8001   │
-│                  │              │  qwen-coder: 8002    │
-│  Unified API     │              │  llama3-70b: 8003    │
-└──────────────────┘              └──────────────────────┘
-         │                                     │
-         │                                     │
-         ▼                                     ▼
-    OpenAI API                          Model Files
-    Compatible                          (/models volume)
+┌───────────────────────────────┐
+│  harinezumigel-llm-stack CLI  │
+└───────────────┬───────────────┘
+                │
+    ┌───────────┴───────────┐
+    │                       │
+    ▼                       ▼
+┌──────────────────┐    ┌──────────────────────┐
+│  LiteLLM Proxy   │    │   vLLM Containers    │
+│  (Host Process)  │    │   (Docker + NVIDIA)  │
+│                  │    │                      │
+│  Port: 4000      │◄───┤  mistral-7b: 8001   │
+│                  │    │  qwen-coder: 8002    │
+│  Unified API     │    │  llama3-70b: 8003    │
+└─────────┬────────┘    └──────────┬───────────┘
+          │                        │
+          ▼                        ▼
+    OpenAI API              Model Files
+    Compatible              (/models volume)
 ```
 
 ## Performance Tuning
