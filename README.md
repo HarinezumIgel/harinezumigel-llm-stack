@@ -304,7 +304,7 @@ Use `--recreate` when:
 
 ```bash
 #!/bin/bash
-# Start all production models
+# Start all models
 
 harinezumigel-llm-stack mistral-7b --recreate
 harinezumigel-llm-stack qwen-coder --port 8002 --recreate
