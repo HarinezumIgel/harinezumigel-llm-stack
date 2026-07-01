@@ -2,8 +2,7 @@
 
 A Python CLI tool for managing [LiteLLM](https://github.com/BerriAI/litellm) proxy servers and [vLLM](https://github.com/vllm-project/vllm) model backends in Docker containers.
 
-> **⚠️ Disclaimer**: This project is provided "as is" and is not intended for production use without proper validation and testing.
-> **⚠️ Disclaimer**: This project is not affiliated with LLMStack (llmstack.ai / Promptly)
+⚠️ **Disclaimer**: This project is provided "as is" without warranty of any kind and is not intended for production use without proper validation and testing. This project is not affiliated with LLMStack (llmstack.ai / Promptly).
 
 ## Overview
 
