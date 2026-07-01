@@ -27,7 +27,6 @@ The script manages the entire lifecycle of your LLM infrastructure:
 - **Flexible deployment**: Manual or automatic port allocation, runtime parameter overrides
 - **Easy monitoring**: Built-in log viewing, container status inspection
 - **Docker-native**: Leverages Docker for isolation, GPU passthrough, and resource management
-- **Production-ready**: Comprehensive validation, error handling, and safety checks
 
 ## Prerequisites
 
@@ -251,18 +250,24 @@ Example:
 
 ## Safety Features
 
+
 🛡️ **Built-in Safety**:
 
-- **No data loss**: Only manages Docker containers, never modifies model files
-- **Explicit operations**: Destructive actions require explicit flags (`--recreate`, `--stop`)
+- **No model modification**: Does not alter model files on disk
+- **Explicit operations**: Container removal only occurs with `--recreate`
 - **Dry-run mode**: Preview all changes with `--dry-run`
-- **Container reuse**: Default behavior reuses existing containers (no unnecessary rebuilds)
+- **Container reuse**: Default behavior reuses existing containers
 - **Scoped operations**: Only manages containers with `vllm-` prefix
 - **Process safety**: Kills only LiteLLM processes matching specific patterns
 - **Port validation**: Checks port availability before binding
 - **Self-protection**: Won't kill its own process when stopping LiteLLM
 
 See [SAFETY_ANALYSIS.md](SAFETY_ANALYSIS.md) for detailed security analysis.
+
+⚠️ **Important**:
+Do NOT store models or any non-reproducible data inside containers.  
+Using `--recreate` removes containers, and any internal container data will be permanently lost.  
+Always use host-mounted directories or Docker volumes for persistence.
 
 ## Container Lifecycle
 
