@@ -35,7 +35,7 @@ It manages:
   ! Using `--recreate` removes containers, and any internal container data will be permanently lost.
   ! Always use host-mounted directories or Docker volumes for persistence.
 - Shows detailed information before making changes
-- Never modifies user data or model files (read-only)
+- Does not modify model files
 
 ## Usage Examples
 
