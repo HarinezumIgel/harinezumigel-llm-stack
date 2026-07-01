@@ -300,7 +300,7 @@ Use `--recreate` when:
 
 ## Advanced Examples
 
-### Production Deployment Script
+### Deployment Script
 
 ```bash
 #!/bin/bash
@@ -425,7 +425,7 @@ Larger context windows require more GPU memory:
 
 - Higher values → better throughput, more memory
 - Lower values → lower memory, potential queuing
-- Recommended: 2-8 for production, 1 for large models
+- Recommended: 2-8 for smaller models, 1 for large models
 
 ### Prefix Caching
 
