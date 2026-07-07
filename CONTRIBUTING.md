@@ -5,11 +5,11 @@ Thank you for your interest in contributing! This document provides guidelines f
 ## Quick Start
 
 1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+2. Create a feature branch (`git checkout -b feature/my-feature`)
 3. Make your changes
 4. Test thoroughly
-5. Commit your changes (`git commit -m 'Add amazing feature'`)
-6. Push to the branch (`git push origin feature/amazing-feature`)
+5. Commit your changes (`git commit -m 'Add my feature'`)
+6. Push to the branch (`git push origin feature/my-feature`)
 7. Open a Pull Request
 
 ## Development Setup
@@ -141,19 +141,19 @@ Ask yourself:
 4. **Consider dry-run**: New operations should support `--dry-run`
 5. **Error handling**: Provide clear error messages
 
-### Good Feature Examples
+### Features that fit the scope
 
-✅ Add support for custom Docker networks
-✅ Add JSON output mode for scripting
-✅ Add health check command
-✅ Support additional vLLM parameters
+- Add support for custom Docker networks
+- Add JSON output mode for scripting
+- Add health check command
+- Support additional vLLM parameters
 
-### Features to Avoid
+### Features outside scope
 
-❌ Automatic model downloading (security risk)
-❌ Modifying config files programmatically (user should control)
-❌ Silent destructive operations (always require explicit flags)
-❌ Hardcoding configuration values
+- Automatic model downloading (security risk)
+- Modifying config files programmatically (user should control)
+- Silent destructive operations (always require explicit flags)
+- Hardcoding configuration values
 
 ## Pull Request Process
 
@@ -266,7 +266,8 @@ Relevant config.yaml snippet
 
 - 💬 Use [Discussions](https://github.com/Harinezumigel/harinezumigel-llm-stack/discussions) for questions
 - 🐛 Use [Issues](https://github.com/Harinezumigel/harinezumigel-llm-stack/issues) for bugs
-- 📖 Check [README.md](README.md) and [SAFETY_ANALYSIS.md](SAFETY_ANALYSIS.md) first
+- 📖 Check [README.md](README.md) first
+- 🔒 Security issues? See [SECURITY.md](SECURITY.md)
 
 ## Code Review Process
 
@@ -280,9 +281,7 @@ Relevant config.yaml snippet
 
 ### Review Timeline
 
-- Initial review: Usually within 1 week
-- Follow-up reviews: Within 3-5 days
-- Merge: After approval and CI passes (if applicable)
+Review times vary depending on availability. There are no guaranteed turnaround times.
 
 ## License
 

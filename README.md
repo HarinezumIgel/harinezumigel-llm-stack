@@ -20,45 +20,71 @@ The script manages the entire lifecycle of your LLM infrastructure:
 
 ## Features
 
-✨ **Key Features**:
-
 - **Configuration-driven**: All settings from `.env` and `config.yaml` (no hardcoded values)
-- **Defensive**: Dry-run mode, explicit flags for destructive operations, container reuse
-- **Flexible deployment**: Manual or automatic port allocation, runtime parameter overrides
-- **Easy monitoring**: Built-in log viewing, container status inspection
-- **Docker-native**: Leverages Docker for isolation, GPU passthrough, and resource management
+- **Dataclass-based configuration**: `LLMStack` class manages all state and lifecycle operations
+- **Dry-run mode**: Explicit flags for destructive operations, container reuse by default
+- **Port management**: Manual or automatic port allocation, runtime parameter overrides
+- **Log viewing**: JSON stacktrace formatting, container status inspection
+- **Log formatting**: Expands JSON-escaped stack traces to readable multi-line output
+- **Docker-based**: Uses Docker for isolation, GPU passthrough, and resource management
+- **NGC vLLM image**: Uses NVIDIA NGC container image
 
 ## Prerequisites
 
 - Python 3.10+ with `pyyaml` package
-- Docker with NVIDIA Container Toolkit (for GPU support)
-- LiteLLM installation (for proxy server)
+- Docker with NVIDIA GPU support
+- `nvidia-smi` available (for GPU detection)
+- LiteLLM installed in a virtual environment (for proxy server)
 - Pre-downloaded model files in a designated directory
 
-### Installing PyYAML
+### Quick Install
 
-**Ubuntu/Debian:**
+Run the provided installation script:
+
 ```bash
+cd scripts/github_deploy
+./install.sh
+```
+
+The installer will:
+- Check Python, Docker, and GPU availability
+- Install PyYAML (system package preferred)
+- Create `/opt/litellm` directory structure
+- Copy example configuration files
+- Create a symlink to `~/.local/bin/harinezumigel-llm-stack`
+- Guide you through setup steps
+
+### Manual Installation
+
+**PyYAML:**
+```bash
+# Ubuntu/Debian (recommended)
 sudo apt install python3-yaml
-```
 
-**Fedora/RHEL:**
-```bash
+# Fedora/RHEL
 sudo dnf install python3-pyyaml
+
+# Or via pip if needed
+pip3 install --user pyyaml
 ```
 
-**Using pip (if system packages unavailable):**
+**LiteLLM:**
 ```bash
-# Create a virtual environment (recommended)
-python3 -m venv ~/setupllm-venv
-source ~/setupllm-venv/bin/activate
-pip install pyyaml
-
-# Or use pipx for isolated installation
-pipx install pyyaml
+python3 -m venv /opt/litellm/venv
+source /opt/litellm/venv/bin/activate
+pip install 'litellm[proxy]'
 ```
 
 ## Installation
+
+### Automated Installation (Recommended)
+
+```bash
+cd scripts/github_deploy
+./install.sh
+```
+
+### Manual Installation
 
 1. **Clone this repository**:
    ```bash
@@ -66,21 +92,29 @@ pipx install pyyaml
    cd <repo-directory>
    ```
 
-2. **Install Python dependencies**:
-   ```bash
-   pip install pyyaml
-   ```
-
-3. **Ensure Docker is running**:
-   ```bash
-   docker --version
-   nvidia-docker --version  # or docker with nvidia runtime
-   ```
-
-4. **Set up directory structure**:
+2. **Create directory structure**:
    ```bash
    sudo mkdir -p /opt/litellm
    sudo chown $USER:$USER /opt/litellm
+   ```
+
+3. **Copy example configs**:
+   ```bash
+   cp .env.example /opt/litellm/.env
+   cp config.yaml.example /opt/litellm/config.yaml
+   ```
+
+4. **Create symlink**:
+   ```bash
+   mkdir -p ~/.local/bin
+   ln -s $(pwd)/harinezumigel-llm-stack.py ~/.local/bin/harinezumigel-llm-stack
+   chmod +x harinezumigel-llm-stack.py
+   ```
+
+5. **Add to PATH** (if needed):
+   ```bash
+   echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+   source ~/.bashrc
    ```
 
 ## Configuration
@@ -90,32 +124,43 @@ pipx install pyyaml
 Create a `.env` file with deployment settings:
 
 ```bash
-# LiteLLM Configuration
+# Core paths
 LITELLM_CONFIG=/opt/litellm/config.yaml
-LITELLM_VENV_ACTIVATE=/path/to/venv/bin/activate
-LITELLM_BIN=/path/to/venv/bin/litellm
+MODEL_ROOT=/opt/models
+
+LITELLM_VENV_ACTIVATE=/opt/litellm/venv/bin/activate
+LITELLM_BIN=/opt/litellm/venv/bin/litellm
+
+# LiteLLM proxy bind
 LITELLM_BIND_HOST=0.0.0.0
 LITELLM_PORT=4000
 
-# Model Storage
-MODEL_ROOT=/path/to/models
-
-# vLLM Configuration
+# Shared vLLM host / bind
 VLLM_HOST=localhost
 VLLM_BIND_HOST=0.0.0.0
 VLLM_CONTAINER_PORT=8000
-VLLM_DOCKER_IMAGE=vllm/vllm-openai:latest
 
-# Docker Volumes
-VLLM_MODEL_VOLUME=/path/to/models:/models:ro
-VLLM_CACHE_VOLUME=/path/to/cache:/root/.cache/huggingface:rw
+# Docker runtime image and mounts
+# Use NVIDIA NGC vLLM image for best GPU support
+VLLM_DOCKER_IMAGE=nvcr.io/nvidia/vllm:26.05.post1-py3
+VLLM_MODEL_VOLUME=/opt/models:/models
+VLLM_CACHE_VOLUME=/opt/vllm-cache:/root/.cache/huggingface
 
-# Port Range for Auto-allocation
+# Optional auto-port range
 VLLM_AUTO_PORT_START=8001
 VLLM_AUTO_PORT_END=8010
 
-# Optional: API Key for vLLM endpoints
-LOCAL_VLLM_API_KEY=your-secret-key-here
+# API keys
+LITELLM_MASTER_KEY=sk-change-me
+LOCAL_VLLM_API_KEY=sk-change-me
+
+# Backend ports (one per model)
+LLAMA_GUARD3_8B_PORT=8001
+QWEN3_CODER_NEXT_PORT=8002
+
+# Full API bases (use variable expansion)
+LLAMA_GUARD3_8B_API_BASE=http://${VLLM_HOST}:${LLAMA_GUARD3_8B_PORT}/v1
+QWEN3_CODER_3_NEXT_API_BASE=http://${VLLM_HOST}:${QWEN3_CODER_NEXT_PORT}/v1
 ```
 
 ### 2. LiteLLM Config (`/opt/litellm/config.yaml`)
@@ -124,33 +169,72 @@ Define your model deployments:
 
 ```yaml
 model_list:
-  - model_name: mistral-7b
+  # Safety / moderation model
+  - model_name: llama_guard3_8b
     litellm_params:
-      model: openai/mistral-7b
-      api_base: http://localhost:8001/v1
+      litellm_provider: openai
+      model: openai/llama_guard3_8b
+      api_base: os.environ/LLAMA_GUARD3_8B_API_BASE
       api_key: os.environ/LOCAL_VLLM_API_KEY
+      request_timeout: 60
+      temperature: 0.0
+      top_p: 1.0
     model_info:
-      context_length: 32768
-      max_input_tokens: 28672
-      max_output_tokens: 4096
-      gpu_memory_utilization: 0.90
-      max_num_seqs: 4
-      enable_prefix_caching: true
+      model_dir: llama-guard-3-8b
+      context_length: 2048
+      max_input_tokens: 1536
+      max_output_tokens: 64
+      max_tokens: 64
+      gpu_memory_utilization: 0.20
+      max_num_seqs: 8
+      max_num_batched_tokens: 2048
+      dtype: auto
+      description: "Llama Guard 3 8B safety/moderation model"
 
-  - model_name: qwen-coder
+  # Primary coding / agentic model
+  - model_name: Qwen3-Coder-Next-AWQ
     litellm_params:
-      model: openai/qwen-coder
-      api_base: http://localhost:8002/v1
+      litellm_provider: openai
+      model: openai/Qwen3-Coder-Next-AWQ
+      api_base: os.environ/QWEN3_CODER_3_NEXT_API_BASE
       api_key: os.environ/LOCAL_VLLM_API_KEY
+      request_timeout: 240
+      temperature: 0.2
+      top_p: 0.9
+      top_k: 20
     model_info:
-      context_length: 32768
-      max_input_tokens: 28672
+      model_dir: Qwen3-Coder-Next-AWQ
+      context_length: 262144
+      max_input_tokens: 250000
       max_output_tokens: 4096
-      gpu_memory_utilization: 0.85
-      max_num_seqs: 2
-      model_dir: Qwen2.5-Coder-32B-Instruct-AWQ
+      max_tokens: 4096
+      gpu_memory_utilization: 0.90
+      max_num_seqs: 1
+      max_num_batched_tokens: 8192
+      quantization: compressed-tensors
+      kv_cache_dtype: fp8
+      generation_config: vllm
       enable_auto_tool_choice: true
-      tool_call_parser: llama3_json
+      tool_call_parser: qwen3_coder
+      enable_prefix_caching: true
+      attention_backend: flashinfer
+      enforce_eager: false
+      dtype: auto
+      description: "Qwen3-Coder-Next AWQ big-context profile"
+
+router_settings:
+  routing_strategy: simple-shuffle
+
+litellm_settings:
+  drop_params: true
+  set_verbose: false
+  request_timeout: 240
+  json_logs: true
+  turn_off_message_logging: true
+  redact_user_api_key_info: true
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
 ```
 
 ## Usage
@@ -165,30 +249,30 @@ harinezumigel-llm-stack --list
 
 ```bash
 # Start with default settings (reuses existing container if available)
-harinezumigel-llm-stack mistral-7b
+harinezumigel-llm-stack llama_guard3_8b --start
 
 # Start with explicit port
-harinezumigel-llm-stack qwen-coder --port 8003
+harinezumigel-llm-stack Qwen3-Coder-Next-AWQ --start --port 8003
 
 # Start with automatic port allocation
-harinezumigel-llm-stack qwen2_5_32b_awq --auto-port
+harinezumigel-llm-stack llama_guard3_8b --start --auto-port
 
 # Recreate container (removes and rebuilds)
-harinezumigel-llm-stack mistral-7b --recreate
+harinezumigel-llm-stack Qwen3-Coder-Next-AWQ --start --recreate
 ```
 
 ### Override Runtime Parameters
 
 ```bash
 # Override context length and GPU memory
-harinezumigel-llm-stack qwen-coder \
-  --context-length 16384 \
-  --max-input-tokens 14336 \
-  --max-output-tokens 2048 \
-  --gpu-memory-utilization 0.80
+harinezumigel-llm-stack Qwen3-Coder-Next-AWQ --start \
+  --context-length 131072 \
+  --max-input-tokens 125000 \
+  --max-output-tokens 4096 \
+  --gpu-memory-utilization 0.85
 
 # Limit concurrent requests
-harinezumigel-llm-stack mistral-7b --max-num-seqs 1
+harinezumigel-llm-stack llama_guard3_8b --start --max-num-seqs 4
 ```
 
 ### Dry Run Mode
@@ -196,44 +280,61 @@ harinezumigel-llm-stack mistral-7b --max-num-seqs 1
 Preview changes without executing:
 
 ```bash
-harinezumigel-llm-stack mistral-7b --recreate --dry-run
+harinezumigel-llm-stack llama_guard3_8b --start --recreate --dry-run
 ```
 
 ### Start LiteLLM Proxy
 
 ```bash
-harinezumigel-llm-stack --litellm
+# Start in background
+harinezumigel-llm-stack litellm --start
+
+# Start and follow logs (foreground, with formatted JSON stacktraces)
+harinezumigel-llm-stack litellm --start --show-log
+
+# Stop the proxy
+harinezumigel-llm-stack litellm --stop
 ```
 
 The proxy will be available at `http://localhost:4000` (or your configured port).
 
+**Note**: When using `--show-log`, JSON log lines with `stacktrace` fields are automatically formatted to display stack traces with real newlines for readability.
+
 ### View Logs
 
 ```bash
-# View recent logs
-harinezumigel-llm-stack qwen-coder --logs
+# View recent logs (last 200 lines)
+harinezumigel-llm-stack Qwen3-Coder-Next-AWQ --show-log
 
 # Follow logs in real-time
-harinezumigel-llm-stack mistral-7b --logs --follow
+harinezumigel-llm-stack llama_guard3_8b --show-log --follow
 
 # Show more log lines
-harinezumigel-llm-stack qwen-coder --logs --tail 500
+harinezumigel-llm-stack Qwen3-Coder-Next-AWQ --show-log --tail 500
 
 # Show log file path
-harinezumigel-llm-stack mistral-7b --log-path
+harinezumigel-llm-stack llama_guard3_8b --show-log-path
+
+# Show all log paths
+harinezumigel-llm-stack all --show-log-path
+
+# Clean/truncate log files
+harinezumigel-llm-stack all --clean-log
 ```
+
+**Log Formatting**: The tool automatically formats JSON log output from LiteLLM and vLLM. Stack traces embedded in JSON (with escaped `\n`) are expanded to real newlines for readability.
 
 ### Stop Containers
 
 ```bash
 # Stop a specific model
-harinezumigel-llm-stack --stop qwen-coder
+harinezumigel-llm-stack Qwen3-Coder-Next-AWQ --stop
 
 # Stop all configured models
-harinezumigel-llm-stack --stop all
+harinezumigel-llm-stack all --stop
 
 # Stop LiteLLM proxy
-harinezumigel-llm-stack --stop-litellm
+harinezumigel-llm-stack litellm --stop
 ```
 
 ## Model Directory Discovery
@@ -241,17 +342,14 @@ harinezumigel-llm-stack --stop-litellm
 The script automatically finds model directories using fuzzy matching:
 
 1. **Explicit path**: Set `model_info.model_dir` in config.yaml
-2. **Fuzzy matching**: Matches directory names against model name
-3. **Token matching**: Finds directories containing model name tokens
+2. **Fuzzy matching**: Matches directory names against model name (case-insensitive, punctuation-normalized)
+3. **Token matching**: Finds directories containing all model name tokens
 
-Example:
-- Model name: `qwen-2.5-32b-awq`
-- Matches directory: `Qwen2.5-32B-Instruct-AWQ` ✓
+Examples:
+- Model name: `llama_guard3_8b`, Directory: `llama-guard-3-8b` ✓
+- Model name: `Qwen3-Coder-Next-AWQ`, Directory: `Qwen3-Coder-Next-AWQ` ✓
 
 ## Safety Features
-
-
-🛡️ **Built-in Safety**:
 
 - **No model modification**: Does not alter model files on disk
 - **Explicit operations**: Container removal only occurs with `--recreate`
@@ -262,11 +360,11 @@ Example:
 - **Port validation**: Checks port availability before binding
 - **Self-protection**: Won't kill its own process when stopping LiteLLM
 
-See [SAFETY_ANALYSIS.md](SAFETY_ANALYSIS.md) for detailed security analysis.
+See [SECURITY.md](SECURITY.md) for vulnerability reporting and security scope.
 
 ⚠️ **Important**:
-Do NOT store models or any non-reproducible data inside containers.  
-Using `--recreate` removes containers, and any internal container data will be permanently lost.  
+Do NOT store models or any non-reproducible data inside containers.
+Using `--recreate` removes containers, and any internal container data will be permanently lost.
 Always use host-mounted directories or Docker volumes for persistence.
 
 ## Container Lifecycle
@@ -306,12 +404,11 @@ Use `--recreate` when:
 #!/bin/bash
 # Start all models
 
-harinezumigel-llm-stack mistral-7b --recreate
-harinezumigel-llm-stack qwen-coder --port 8002 --recreate
-harinezumigel-llm-stack llama3-70b --port 8003 --max-num-seqs 2
+harinezumigel-llm-stack llama_guard3_8b --start --recreate
+harinezumigel-llm-stack Qwen3-Coder-Next-AWQ --start --port 8002 --recreate
 
 # Start LiteLLM proxy
-harinezumigel-llm-stack --litellm
+harinezumigel-llm-stack litellm --start
 
 echo "All models started. LiteLLM available at http://localhost:4000"
 ```
@@ -322,11 +419,14 @@ echo "All models started. LiteLLM available at http://localhost:4000"
 #!/bin/bash
 # Check model container status
 
-for model in mistral-7b qwen-coder llama3-70b; do
+for model in llama_guard3_8b Qwen3-Coder-Next-AWQ; do
     echo "=== $model ==="
-    harinezumigel-llm-stack $model --logs --tail 10
+    harinezumigel-llm-stack $model --show-log --tail 10
     echo
 done
+
+# Or check all at once
+harinezumigel-llm-stack all --ps
 ```
 
 ## Troubleshooting
@@ -338,13 +438,13 @@ done
 netstat -tuln | grep 8001
 
 # View container logs
-harinezumigel-llm-stack MODEL_NAME --logs --tail 100
+harinezumigel-llm-stack llama_guard3_8b --show-log --tail 100
 
 # Recreate with dry-run to see command
-harinezumigel-llm-stack MODEL_NAME --recreate --dry-run
+harinezumigel-llm-stack llama_guard3_8b --start --recreate --dry-run
 
 # Force recreate
-harinezumigel-llm-stack MODEL_NAME --recreate
+harinezumigel-llm-stack llama_guard3_8b --start --recreate
 ```
 
 ### API key issues
@@ -370,11 +470,19 @@ model_info:
 Reduce GPU memory utilization or concurrent requests:
 
 ```bash
-harinezumigel-llm-stack MODEL_NAME \
+harinezumigel-llm-stack Qwen3-Coder-Next-AWQ --start \
   --gpu-memory-utilization 0.70 \
   --max-num-seqs 1 \
   --recreate
 ```
+
+### Unreadable log output / stack traces
+
+The tool automatically formats JSON logs with embedded stack traces. If you see escaped `\n` sequences:
+
+1. Use the tool's `--show-log` command (formatting is automatic)
+2. For direct Docker logs: `docker logs vllm-<container>` won't have formatting
+3. LiteLLM logs with `--show-log` flag expand stacktraces for readability
 
 ## Environment Variable Override
 
@@ -388,26 +496,39 @@ harinezumigel-llm-stack --list
 ## Architecture
 
 ```
-┌───────────────────────────────┐
-│  harinezumigel-llm-stack CLI  │
-└───────────────┬───────────────┘
+┌─────────────────────────────────────┐
+│  harinezumigel-llm-stack CLI        │
+│  (LLMStack class manages all state) │
+└───────────────┬─────────────────────┘
                 │
     ┌───────────┴───────────┐
     │                       │
     ▼                       ▼
-┌──────────────────┐    ┌──────────────────────┐
-│  LiteLLM Proxy   │    │   vLLM Containers    │
-│  (Host Process)  │    │   (Docker + NVIDIA)  │
-│                  │    │                      │
-│  Port: 4000      │◄───┤  mistral-7b: 8001    │
-│                  │    │  qwen-coder: 8002    │
-│  Unified API     │    │  llama3-70b: 8003    │
-└─────────┬────────┘    └──────────┬───────────┘
+┌──────────────────┐    ┌────────────────────────────┐
+│  LiteLLM Proxy   │    │   vLLM Containers          │
+│  (Host Process)  │    │   (Docker + NVIDIA GPU)    │
+│                  │    │                            │
+│  Port: 4000      │◄───┤  llama_guard3_8b: 8001     │
+│                  │    │  Qwen3-Coder-Next: 8002    │
+│  Unified API     │    │  (NGC vLLM image)          │
+└─────────┬────────┘    └──────────┬─────────────────┘
           │                        │
           ▼                        ▼
     OpenAI API              Model Files
     Compatible              (/models volume)
 ```
+
+### Code Structure
+
+The tool is built around a single `LLMStack` class that manages:
+
+- **Configuration**: Loads `.env` and `config.yaml`
+- **Model management**: Resolves model names, finds directories, builds Docker commands
+- **Container lifecycle**: Start, stop, recreate, reuse existing containers
+- **Logs**: View, follow, and clean container logs (with JSON stacktrace formatting)
+- **LiteLLM proxy**: Start/stop the unified API gateway
+
+Pure utility functions remain at module level for string manipulation, type coercion, and subprocess execution.
 
 ## Performance Tuning
 
@@ -415,9 +536,10 @@ harinezumigel-llm-stack --list
 
 Larger context windows require more GPU memory:
 
-- 32K context: ~0.85-0.90 GPU memory utilization
+- 262K context (Qwen3-Coder-Next): ~0.90 GPU memory, fp8 kv_cache, FlashInfer backend
+- 32K context (typical): ~0.85-0.90 GPU memory utilization
 - 16K context: ~0.75-0.85 GPU memory utilization
-- 8K context: ~0.65-0.75 GPU memory utilization
+- 2K context (Llama Guard): ~0.20 GPU memory (small safety model)
 
 ### Concurrent Requests
 
@@ -425,15 +547,18 @@ Larger context windows require more GPU memory:
 
 - Higher values → better throughput, more memory
 - Lower values → lower memory, potential queuing
-- Recommended: 2-8 for smaller models, 1 for large models
+- Recommended: 1 for very large context models, 2-8 for smaller models
 
-### Prefix Caching
+### Advanced vLLM Features
 
-Enable for models with repetitive prompts (system messages):
+For large context models (>100K tokens):
 
 ```yaml
 model_info:
-  enable_prefix_caching: true
+  attention_backend: flashinfer  # Required for very large context
+  kv_cache_dtype: fp8            # Compress KV cache
+  quantization: compressed-tensors  # AWQ/GPTQ models
+  enable_prefix_caching: true    # Cache system prompts
 ```
 
 ## Contributing
@@ -470,12 +595,12 @@ pip install pyyaml
 
 ## Acknowledgments
 
-Built with these excellent open-source projects:
+Built on these open-source projects:
 
 - **[PyYAML](https://github.com/yaml/pyyaml)** - YAML parser for Python (MIT License)
-- **[LiteLLM](https://github.com/BerriAI/litellm)** - Universal LLM proxy with OpenAI-compatible API
-- **[vLLM](https://github.com/vllm-project/vllm)** - High-throughput, memory-efficient inference engine
-- **[Docker](https://www.docker.com/)** - Containerization platform for isolated deployments
+- **[LiteLLM](https://github.com/BerriAI/litellm)** - LLM proxy with OpenAI-compatible API
+- **[vLLM](https://github.com/vllm-project/vllm)** - High-throughput inference engine
+- **[Docker](https://www.docker.com/)** - Containerization platform
 
 ## Support
 
@@ -511,6 +636,10 @@ This software is provided "as is" without warranty of any kind, express or impli
 - Always test in a non-production environment first
 - Review all configurations before deploying models
 - Monitor resource usage and costs when using cloud infrastructure
-- Comply with model licenses and usage restrictions
+- **Comply with model licenses and usage restrictions**
+
+## Model Licenses
+
+This configuration references third-party models. Model licenses, usage rights, and restrictions are determined by the upstream model publishers. Consult the `upstream` field in `config.yaml` (or the output of `harinezumigel-llm-stack --list`) for the current license and terms applicable to each model.
 
 By using this software, you accept full responsibility for all consequences of its deployment and operation.

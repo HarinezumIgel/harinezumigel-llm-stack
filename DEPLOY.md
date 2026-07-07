@@ -12,7 +12,7 @@ This directory contains all files ready for publishing to GitHub.
 - `README.md` - Main project documentation (12KB)
 - `CONTRIBUTING.md` - Contribution guidelines (7.4KB)
 - `CHANGELOG.md` - Version history (3.4KB)
-- `SAFETY_ANALYSIS.md` - Security analysis (3.0KB)
+- `SECURITY.md` - Vulnerability reporting and security scope
 - `ARGS_SUGGESTIONS.md` - CLI improvement proposals (6.2KB)
 
 ### Configuration Examples

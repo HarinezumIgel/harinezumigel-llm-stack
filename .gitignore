@@ -38,6 +38,7 @@ ENV/
 # Configuration (contains secrets)
 .env
 *.local
+config.yaml
 
 # Logs
 *.log
@@ -50,3 +51,6 @@ htmlcov/
 # Temporary files
 *.tmp
 *.bak
+
+# Continue
+.continue

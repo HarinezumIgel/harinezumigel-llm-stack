@@ -14,6 +14,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Shell completion scripts
 - Docker Compose support
 
+## [1.1.0] - 2026-07-07
+
+### Added
+- `model_info.license` and `model_info.upstream` fields in `config.yaml` for all models
+- `ModelDeployment.license` and `ModelDeployment.upstream` dataclass fields
+- `--list` output now shows `license` and `upstream` for each model
+- `config_metadata` block in `config.yaml` with repository license and third-party model notice
+- `config.yaml.example` expanded from 2 models to 8 configured models:
+  - `llama_guard3_8b`, `llama_3_1_8b`, `mistral_7b`
+  - `qwen2_5_32b_awq`, `Qwen3-Coder-Next-AWQ`, `qwen3.6-27b`
+  - `deepseek-coder-6.7b-instruct`, `deepseek-v4-pro-70b`
+- Full vLLM runtime parameters per model: `quantization`, `kv_cache_dtype`,
+  `generation_config`, `attention_backend`, `enable_prefix_caching`,
+  `enforce_eager`, `enable_auto_tool_choice`, `tool_call_parser`,
+  `max_num_seqs`, `max_num_batched_tokens`, `gpu_memory_utilization`
+- `top_k` added to `litellm_params` for applicable models
+- `install.sh` now auto-creates the LiteLLM virtual environment (`/opt/litellm/venv`) with user consent
+- `install.sh` detects an existing venv and offers upgrade instead of blind recreation
+- `install.sh` offers to open both `.env` and `config.yaml` for editing at the end
+- `install.sh` shows GPU name, driver version, and memory for each detected GPU
+- `install.sh` verifies Docker daemon is running (not just installed)
+- `install.sh` steps are numbered with clear section headers
+- `README.md` dedicated **Model Licenses** section
+- `SECURITY.md` with responsible-disclosure policy (replaces `SAFETY_ANALYSIS.md`)
+
+### Changed
+- `install.sh` is significantly more verbose: every check and action is narrated
+- `install.sh` summary shows venv step only if it was skipped
+- `install.sh` next-steps section uses bullet points and clearer wording
+
+### Fixed
+- `install.sh`: `rm -f` on symlink path now distinguishes between symlinks and regular files;
+  removing a regular file requires explicit confirmation to avoid accidental data loss
+- `install.sh`: `sed -i` on `.env` now uses a `.bak` backup, removed only on success,
+  so an interrupted write cannot corrupt the file
+- `harinezumigel-llm-stack.py`: removed dead `force=True` parameter from
+  `_docker_remove_container` — passing it would have bypassed the stop-before-remove
+  safety sequence
+- `harinezumigel-llm-stack.py`: `clean_vllm_logs` now validates that the Docker-reported
+  log path starts with `/var/lib/docker/` and ends with `.log` before running
+  `sudo truncate`, preventing privilege escalation via unexpected log paths
+- `config.yaml` `qwen3.6-27b` upstream URL corrected from the org page
+  (`https://huggingface.co/Qwen`) to the specific model page
+  (`https://huggingface.co/Qwen/Qwen3.6-27B`)
+
+### Removed
+- `SAFETY_ANALYSIS.md` replaced by `SECURITY.md`
+
 ## [1.0.0] - 2026-06-30
 
 ### Added
@@ -29,7 +77,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fuzzy model directory matching
 - Self-PID protection in LiteLLM stop operation
 - Explicit SIGTERM signal for graceful process shutdown
-- Comprehensive documentation (README, CONTRIBUTING, SAFETY_ANALYSIS)
+- Comprehensive documentation (README, CONTRIBUTING, SECURITY)
 - Example configuration files (.env.example, config.yaml.example)
 
 ### Security
@@ -49,7 +97,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 - Comprehensive README.md with usage examples
-- SAFETY_ANALYSIS.md detailing security review
+- SECURITY.md with vulnerability reporting policy
 - ARGS_SUGGESTIONS.md with CLI improvement proposals
 - CONTRIBUTING.md for contributor guidelines
 - Example configuration files with detailed comments
