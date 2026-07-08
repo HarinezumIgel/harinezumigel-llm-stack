@@ -100,7 +100,6 @@ License: MIT
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -409,10 +408,13 @@ def _format_log_line(line: str) -> str:
     """
     try:
         obj = json.loads(line)
-        stacktrace = obj.get("stacktrace")
+        if not isinstance(obj, dict):
+            return line
+        obj_dict = cast(dict[str, Any], obj)
+        stacktrace = obj_dict.get("stacktrace")
         if stacktrace:
-            without_trace = {k: v for k, v in obj.items() if k != "stacktrace"}
-            return json.dumps(without_trace) + "\n" + stacktrace
+            without_trace = {k: v for k, v in obj_dict.items() if k != "stacktrace"}
+            return json.dumps(without_trace) + "\n" + str(stacktrace)
         return line
     except (json.JSONDecodeError, ValueError):
         return line
@@ -1350,6 +1352,7 @@ Current model values from LiteLLM config:
         raw_info = model.model_info
 
         print(f"=== Starting vLLM model: {model.name} ===")
+        print(f"Docker image:             {self.config.vllm_docker_image}")
         print(f"Container:                vllm-{docker_safe_name(model.name)}-{port}")
         print(f"Model directory:           {model_dir}")
         print(f"Directory basename:        {model_dir.name}")
