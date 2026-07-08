@@ -39,16 +39,19 @@ It manages:
 
 ## Usage Examples
 
-    # List configured models
+    # List configured models (shows model names and aliases)
     harinezumigel-llm-stack --list
 
     # Start a model (reuses existing container if available)
     harinezumigel-llm-stack mistral_7b --start
 
+    # Start using an alias (if configured in model_info.alias)
+    harinezumigel-llm-stack coder --start
+
     # Start a model AND follow logs (stays attached)
     harinezumigel-llm-stack mistral_7b --start --log --follow
 
-    # Start with explicit port
+    # Start with explicit port (works with both name and alias)
     harinezumigel-llm-stack qwen-coder --start --port 8003
 
     # Recreate container with new settings
@@ -63,9 +66,9 @@ It manages:
     # Stop LiteLLM proxy
     harinezumigel-llm-stack litellm --stop
 
-    # View logs (container must be running)
+    # View logs (container must be running, works with alias)
     harinezumigel-llm-stack qwen-coder --show-log
-    harinezumigel-llm-stack qwen-coder --show-log --follow
+    harinezumigel-llm-stack coder --show-log --follow  # using alias
 
     # Show log file paths
     harinezumigel-llm-stack qwen-coder --show-log-path
@@ -76,12 +79,14 @@ It manages:
     harinezumigel-llm-stack qwen-coder --clean-log
     harinezumigel-llm-stack all --clean-log
 
-    # Check container status
+    # Check container status (works with alias)
     harinezumigel-llm-stack qwen-coder --ps
+    harinezumigel-llm-stack coder --ps  # using alias
     harinezumigel-llm-stack all --ps
 
-    # Stop containers
+    # Stop containers (works with alias)
     harinezumigel-llm-stack qwen-coder --stop
+    harinezumigel-llm-stack coder --stop  # using alias
     harinezumigel-llm-stack all --stop
 The script does not hardcode model ports, bind hosts, Docker image names, or
 model paths. All values come from .env and config.yaml files.
@@ -296,34 +301,12 @@ def resolve_env_value(value: Any) -> Any:
     return value
 
 
-def canonical(name: str) -> str:
-    """Normalize model names for matching.
-
-    Converts to lowercase and replaces dots/hyphens with underscores
-    for fuzzy matching of model names.
-    """
-    name = name.replace(".", "_").replace("-", "_")
-    name = re.sub(r"_+", "_", name)
-    return name.lower()
-
-
 def docker_safe_name(name: str) -> str:
     """Make a Docker-safe container-name fragment."""
     name = name.lower()
     name = re.sub(r"[^a-z0-9_.-]+", "-", name)
     name = re.sub(r"-+", "-", name)
     return name.strip("-")
-
-
-def compact_name(name: str) -> str:
-    """Remove punctuation for fuzzy model-dir matching."""
-    return re.sub(r"[^a-zA-Z0-9]", "", name).lower()
-
-
-def model_tokens(name: str) -> list[str]:
-    """Tokenize a model name for fuzzy model-dir matching."""
-    parts = re.split(r"[^a-zA-Z0-9]+", name.lower())
-    return [part for part in parts if part and len(part) >= 2]
 
 
 def backend_model_without_provider(model: str) -> str:
@@ -525,6 +508,7 @@ class ModelDeployment:  # pylint: disable=too-many-instance-attributes
     dtype: str
     license: str | None
     upstream: str | None
+    alias: str | None
 
 
 @dataclass(frozen=True)
@@ -614,6 +598,7 @@ class LLMStack:
             backend_model = resolve_env_value(params.get("model", ""))
             license_info = model_info.get("license")
             upstream = model_info.get("upstream")
+            alias = model_info.get("alias") or None
 
             if api_base:
                 api_base_host, api_base_port = self._parse_api_base(api_base)
@@ -638,7 +623,20 @@ class LLMStack:
                 dtype=str(model_info.get("dtype", "auto")),
                 license=license_info,
                 upstream=upstream,
+                alias=alias,
             )
+
+        # Validate alias uniqueness
+        seen_aliases: dict[str, str] = {}
+        for model_name, deployment in deployments.items():
+            if deployment.alias:
+                if deployment.alias in seen_aliases:
+                    print(
+                        f"ERROR: Duplicate alias '{deployment.alias}' on models "
+                        f"'{seen_aliases[deployment.alias]}' and '{model_name}'."
+                    )
+                    sys.exit(1)
+                seen_aliases[deployment.alias] = model_name
 
         self.models = deployments
 
@@ -647,65 +645,48 @@ class LLMStack:
     # ------------------------------------------------------------------
 
     def _resolve_model_name(self, user_input: str) -> str | None:
-        """Resolve user input to a configured model name."""
-        canon_input = canonical(user_input)
+        """Resolve user input to a configured model name (exact match only).
 
-        for model_name in self.models:
-            if canonical(model_name) == canon_input:
+        Checks both model_name and model_info.alias.
+        """
+        for model_name, model in self.models.items():
+            if model_name == user_input:
+                return model_name
+            if model.alias and model.alias == user_input:
+                print(f"Resolved alias '{user_input}' to model '{model_name}'")
                 return model_name
 
         return None
 
-    def _find_model_dir(self, model: ModelDeployment) -> Path:
+    def _find_model_dir(self, model: ModelDeployment, *, dry_run: bool = False) -> Path:
         """Find the local model directory for a deployment.
 
-        Searches for the model directory in MODEL_ROOT using:
-        1. Explicit model_info.model_dir if configured
-        2. Exact compact name match
-        3. Directory name contains all model name tokens
+        Requires model_info.model_dir to be set explicitly in config.yaml.
 
         Returns:
             Path to the model directory
 
         Raises:
-            RuntimeError: If model directory cannot be found
+            RuntimeError: If model_dir is not configured or the directory does not exist
 
         Safety: This function only reads directories, never modifies them.
         """
         explicit_model_dir = model.model_info.get("model_dir")
 
-        if explicit_model_dir:
-            explicit_path = Path(self.config.model_root) / explicit_model_dir
-
-            if explicit_path.is_dir():
-                return explicit_path
-
+        if not explicit_model_dir:
             raise RuntimeError(
-                f"Configured model_dir does not exist for {model.name}: {explicit_path}"
+                f"model_info.model_dir is not set for model '{model.name}'. "
+                f"Add model_dir to the model_info section in config.yaml."
             )
 
-        model_root = Path(self.config.model_root)
+        explicit_path = Path(self.config.model_root) / explicit_model_dir
 
-        if not model_root.is_dir():
-            raise RuntimeError(f"Model root does not exist: {self.config.model_root}")
+        if explicit_path.is_dir():
+            return explicit_path
 
-        target_compact = compact_name(model.name)
-        target_tokens = model_tokens(model.name)
-        entries = [entry for entry in model_root.iterdir() if entry.is_dir()]
-
-        for entry in entries:
-            if compact_name(entry.name).startswith(target_compact):
-                return entry
-
-        for entry in entries:
-            if target_compact.startswith(compact_name(entry.name)):
-                return entry
-
-        for entry in entries:
-            if all(token in entry.name.lower() for token in target_tokens):
-                return entry
-
-        raise RuntimeError(f"No matching model directory found for {model.name}")
+        raise RuntimeError(
+            f"Model directory does not exist for '{model.name}': {explicit_path}"
+        )
 
     def _find_free_port(self) -> int:
         """Find a free vLLM port in the configured auto-port range.
@@ -947,6 +928,8 @@ class LLMStack:
             backend_served = backend_model_without_provider(model.backend_model)
 
             print(f"{model.name}")
+            if model.alias:
+                print(f"  alias:                    {model.alias}")
             print(f"  api_base:                 {model.api_base}")
             print(f"  api_base_host:            {model.api_base_host}")
             print(f"  api_base_port:            {model.api_base_port}")
@@ -975,6 +958,15 @@ class LLMStack:
 
             print()
 
+        aliases = [(m.alias, m.name) for m in self.models.values() if m.alias]
+        if aliases:
+            col = max(len(a) for a, _ in aliases)
+            print("Aliases")
+            print("-------")
+            for alias, model_name in aliases:
+                print(f"  {alias:<{col}}  →  {model_name}")
+            print()
+
     def generate_help(self) -> str:
         """Generate dynamic help text."""
         keys = [
@@ -996,9 +988,15 @@ class LLMStack:
                 extras.append(f"license={model.license}")
             if model.upstream:
                 extras.append(f"upstream={model.upstream}")
+
+            # Show alias if present
+            name_display = model.name
+            if model.alias:
+                name_display = f"{model.name} (alias: {model.alias})"
+
             model_lines.append(
                 "    "
-                f"{model.name:<22} "
+                f"{name_display:<30} "
                 f"port={str(model.api_base_port):<5} "
                 f"context={str(model.context_length):<6} "
                 f"input={str(model.max_input_tokens):<6} "
@@ -1023,6 +1021,7 @@ Env:
 
 Important:
   Runtime values come from .env and config.yaml.
+  Model aliases can be defined in config.yaml (model_info.alias) for shorter commands.
 
 Examples:
   Show available (configured) models:
@@ -1030,10 +1029,11 @@ Examples:
 
   harinezumigel-llm-stack --list
 
-  Start models:
-  -------------
+  Start models (model name or alias):
+  -----------------------------------
 
-  harinezumigel-llm-stack mistral_7b --start                # start and return to prompt
+  harinezumigel-llm-stack mistral_7b --start                # start using model name
+    harinezumigel-llm-stack coder --start                     # start using alias (if configured)
     harinezumigel-llm-stack mistral_7b --start --show-log    # start and follow logs (stays attached)
     harinezumigel-llm-stack mistral_7b --start --dry-run      # preview what would be done
     harinezumigel-llm-stack mistral_7b --start --recreate     # force recreate container
@@ -1354,6 +1354,8 @@ Current model values from LiteLLM config:
         print(f"Model directory:           {model_dir}")
         print(f"Directory basename:        {model_dir.name}")
         print(f"Served model name:         {model.name}")
+        print(f"License:                   {model.license}")
+        print(f"Upstream:                  {model.upstream}")
         print(
             f"Bind:                      "
             f"{self.config.vllm_bind_host}:{port} -> "
@@ -1393,7 +1395,11 @@ Current model values from LiteLLM config:
         - Validates port availability before binding
         - Respects dry_run flag throughout
         """
-        model_dir = self._find_model_dir(model)
+        try:
+            model_dir = self._find_model_dir(model, dry_run=options.dry_run)
+        except RuntimeError as exc:
+            print(f"ERROR: {exc}")
+            sys.exit(1)
         container_name = f"vllm-{docker_safe_name(model.name)}-{options.port}"
 
         if model.api_base_host and model.api_base_host != self.config.vllm_host:

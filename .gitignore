@@ -54,3 +54,6 @@ htmlcov/
 
 # Continue
 .continue
+
+# Deployment
+push-to-github.sh

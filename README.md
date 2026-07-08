@@ -21,6 +21,7 @@ The script manages the entire lifecycle of your LLM infrastructure:
 ## Features
 
 - **Configuration-driven**: All settings from `.env` and `config.yaml` (no hardcoded values)
+- **Model aliases**: Define short aliases for models (e.g., `coder` for `Qwen3-Coder-Next-AWQ`)
 - **Dataclass-based configuration**: `LLMStack` class manages all state and lifecycle operations
 - **Dry-run mode**: Explicit flags for destructive operations, container reuse by default
 - **Port management**: Manual or automatic port allocation, runtime parameter overrides
@@ -203,6 +204,7 @@ model_list:
       top_p: 0.9
       top_k: 20
     model_info:
+      alias: coder  # Optional: short alias for command-line use
       model_dir: Qwen3-Coder-Next-AWQ
       context_length: 262144
       max_input_tokens: 250000
@@ -245,30 +247,42 @@ general_settings:
 harinezumigel-llm-stack --list
 ```
 
+This displays all configured models with their settings, including any defined aliases.
+
 ### Start a Model Backend
 
 ```bash
 # Start with default settings (reuses existing container if available)
 harinezumigel-llm-stack llama_guard3_8b --start
 
-# Start with explicit port
+# Start using an alias (if configured in model_info.alias)
+harinezumigel-llm-stack coder --start
+
+# Start with explicit port (works with both name and alias)
 harinezumigel-llm-stack Qwen3-Coder-Next-AWQ --start --port 8003
+harinezumigel-llm-stack coder --start --port 8003  # same, using alias
 
 # Start with automatic port allocation
 harinezumigel-llm-stack llama_guard3_8b --start --auto-port
 
 # Recreate container (removes and rebuilds)
 harinezumigel-llm-stack Qwen3-Coder-Next-AWQ --start --recreate
+harinezumigel-llm-stack coder --start --recreate  # same, using alias
 ```
 
 ### Override Runtime Parameters
 
 ```bash
-# Override context length and GPU memory
+# Override context length and GPU memory (works with alias)
 harinezumigel-llm-stack Qwen3-Coder-Next-AWQ --start \
   --context-length 131072 \
   --max-input-tokens 125000 \
   --max-output-tokens 4096 \
+  --gpu-memory-utilization 0.85
+
+# Same using alias
+harinezumigel-llm-stack coder --start \
+  --context-length 131072 \
   --gpu-memory-utilization 0.85
 
 # Limit concurrent requests
@@ -303,11 +317,13 @@ The proxy will be available at `http://localhost:4000` (or your configured port)
 ### View Logs
 
 ```bash
-# View recent logs (last 200 lines)
+# View recent logs (last 200 lines, works with alias)
 harinezumigel-llm-stack Qwen3-Coder-Next-AWQ --show-log
+harinezumigel-llm-stack coder --show-log  # same, using alias
 
 # Follow logs in real-time
 harinezumigel-llm-stack llama_guard3_8b --show-log --follow
+harinezumigel-llm-stack coder --show-log --follow  # using alias
 
 # Show more log lines
 harinezumigel-llm-stack Qwen3-Coder-Next-AWQ --show-log --tail 500
@@ -327,8 +343,9 @@ harinezumigel-llm-stack all --clean-log
 ### Stop Containers
 
 ```bash
-# Stop a specific model
+# Stop a specific model (works with alias)
 harinezumigel-llm-stack Qwen3-Coder-Next-AWQ --stop
+harinezumigel-llm-stack coder --stop  # same, using alias
 
 # Stop all configured models
 harinezumigel-llm-stack all --stop
@@ -337,17 +354,116 @@ harinezumigel-llm-stack all --stop
 harinezumigel-llm-stack litellm --stop
 ```
 
-## Model Directory Discovery
+## Model Directory
 
-The script automatically finds model directories using fuzzy matching:
+Each model must have `model_info.model_dir` set explicitly in `config.yaml`.
+The value must exactly match a directory name inside `MODEL_ROOT` (set in `.env`).
 
-1. **Explicit path**: Set `model_info.model_dir` in config.yaml
-2. **Fuzzy matching**: Matches directory names against model name (case-insensitive, punctuation-normalized)
-3. **Token matching**: Finds directories containing all model name tokens
+```yaml
+model_info:
+  model_dir: Qwen3-Coder-Next-AWQ   # must exist as $MODEL_ROOT/Qwen3-Coder-Next-AWQ
+```
 
-Examples:
-- Model name: `llama_guard3_8b`, Directory: `llama-guard-3-8b` ✓
-- Model name: `Qwen3-Coder-Next-AWQ`, Directory: `Qwen3-Coder-Next-AWQ` ✓
+The path resolved at runtime is:
+
+```
+$MODEL_ROOT / model_dir
+```
+
+If `model_dir` is missing from the config or the directory does not exist, the
+start command will fail with an error before any Docker operation is attempted.
+
+**Example layout:**
+```
+/opt/models/
+  llama-guard3-8b/
+  llama3.1-8b/
+  mistral-7b-instruct-v0.3/
+  qwen2.5-32b-awq/
+  Qwen3-Coder-Next-AWQ/
+  Qwen3.6-27B/
+  deepseek-coder-6.7b-instruct/
+  deepseek-v4-pro-70b/
+```
+
+Corresponding `config.yaml` entries:
+```yaml
+model_info:
+  model_dir: llama-guard3-8b          # llama_guard3_8b
+  model_dir: llama3.1-8b              # llama_3_1_8b
+  model_dir: mistral-7b-instruct-v0.3 # mistral_7b
+  model_dir: qwen2.5-32b-awq          # qwen2_5_32b_awq
+  model_dir: Qwen3-Coder-Next-AWQ     # Qwen3-Coder-Next-AWQ
+  model_dir: Qwen3.6-27B              # qwen3.6-27b
+  model_dir: deepseek-coder-6.7b-instruct  # deepseek-coder-6.7b-instruct
+  model_dir: deepseek-v4-pro-70b      # deepseek-v4-pro-70b
+```
+
+## Model Aliases
+
+You can define short, memorable aliases for models in `config.yaml` to simplify command-line usage. Aliases are optional and defined in the `model_info` section:
+
+```yaml
+model_list:
+  - model_name: Qwen3-Coder-Next-AWQ
+    litellm_params:
+      # ... your litellm params ...
+    model_info:
+      alias: coder  # Optional short alias
+      model_dir: Qwen3-Coder-Next-AWQ
+      # ... rest of model_info ...
+
+  - model_name: llama_guard3_8b
+    litellm_params:
+      # ... your litellm params ...
+    model_info:
+      alias: guard  # Optional short alias
+      model_dir: llama-guard3-8b
+      # ... rest of model_info ...
+```
+
+**Using Aliases:**
+
+All commands that accept a model name also accept aliases:
+
+```bash
+# These are equivalent:
+harinezumigel-llm-stack Qwen3-Coder-Next-AWQ --start
+harinezumigel-llm-stack coder --start
+
+# Works with all operations:
+harinezumigel-llm-stack coder --show-log --follow
+harinezumigel-llm-stack guard --ps
+harinezumigel-llm-stack coder --stop
+```
+
+**Alias Rules:**
+
+- Aliases must be unique across all models
+- Aliases are case-sensitive
+- The `--list` command shows both model names and their aliases
+- When an alias is used, the tool displays which model it resolved to
+
+**API Behavior with Aliases:**
+
+If you start a backend using an alias, LiteLLM exposes that alias as the model identifier for callers. In practice, clients must send the alias in API requests.
+
+```bash
+# If alias is "coder", callers should use:
+curl http://localhost:4000/v1/chat/completions \
+  -H "Authorization: Bearer sk-..." \
+  -H "Content-Type: application/json" \
+  -d '{"model":"coder","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+**Example Output:**
+
+```bash
+$ harinezumigel-llm-stack coder --start
+Resolved alias 'coder' to model 'Qwen3-Coder-Next-AWQ'
+Starting vLLM container for model: Qwen3-Coder-Next-AWQ
+...
+```
 
 ## Safety Features
 
@@ -402,10 +518,10 @@ Use `--recreate` when:
 
 ```bash
 #!/bin/bash
-# Start all models
+# Start all models using aliases for cleaner commands
 
-harinezumigel-llm-stack llama_guard3_8b --start --recreate
-harinezumigel-llm-stack Qwen3-Coder-Next-AWQ --start --port 8002 --recreate
+harinezumigel-llm-stack guard --start --recreate
+harinezumigel-llm-stack coder --start --port 8002 --recreate
 
 # Start LiteLLM proxy
 harinezumigel-llm-stack litellm --start
@@ -417,9 +533,9 @@ echo "All models started. LiteLLM available at http://localhost:4000"
 
 ```bash
 #!/bin/bash
-# Check model container status
+# Check model container status using aliases
 
-for model in llama_guard3_8b Qwen3-Coder-Next-AWQ; do
+for model in guard coder; do
     echo "=== $model ==="
     harinezumigel-llm-stack $model --show-log --tail 10
     echo
@@ -427,6 +543,27 @@ done
 
 # Or check all at once
 harinezumigel-llm-stack all --ps
+```
+
+### Quick Start/Stop with Aliases
+
+```bash
+#!/bin/bash
+# Quick commands using short aliases
+
+# Start models
+harinezumigel-llm-stack guard --start
+harinezumigel-llm-stack coder --start --gpu-memory-utilization 0.85
+
+# Check status
+harinezumigel-llm-stack guard --ps
+harinezumigel-llm-stack coder --ps
+
+# View logs
+harinezumigel-llm-stack coder --show-log --follow &
+
+# Stop when done
+harinezumigel-llm-stack all --stop
 ```
 
 ## Troubleshooting
@@ -437,13 +574,15 @@ harinezumigel-llm-stack all --ps
 # Check if port is in use
 netstat -tuln | grep 8001
 
-# View container logs
-harinezumigel-llm-stack llama_guard3_8b --show-log --tail 100
+# View container logs (can use alias)
+harinezumigel-llm-stack guard --show-log --tail 100
+harinezumigel-llm-stack coder --show-log --tail 100
 
 # Recreate with dry-run to see command
-harinezumigel-llm-stack llama_guard3_8b --start --recreate --dry-run
+harinezumigel-llm-stack guard --start --recreate --dry-run
 
-# Force recreate
+# Force recreate (can use alias)
+harinezumigel-llm-stack coder --start --recreate
 harinezumigel-llm-stack llama_guard3_8b --start --recreate
 ```
 
