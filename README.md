@@ -705,13 +705,95 @@ model_info:
   enable_prefix_caching: true    # Cache system prompts
 ```
 
+## Development and Testing
+
+### Running Tests
+
+The project includes a comprehensive test suite (`test_harinezumigel_llm_stack.py`) with 37 tests covering configuration parsing, model resolution, Docker command generation, and more.
+
+**Requirements:**
+- Python 3.10+
+- PyYAML (for YAML parsing)
+- pytest (for running tests)
+
+**Setup:**
+
+When cloning from GitHub, you must create a virtual environment in the project directory and install the required test dependencies:
+
+```bash
+# Clone the repository (if you haven't already)
+git clone <your-repo-url>
+cd <repo-directory>
+
+# Create a virtual environment in the project directory
+python3 -m venv .venv
+
+# Activate the virtual environment
+source .venv/bin/activate  # On Linux/macOS
+# OR
+.venv\Scripts\activate     # On Windows
+
+# Install required packages
+pip install pyyaml pytest
+
+# Run the test suite
+pytest -q
+
+# Alternative: If pytest command not found, use python -m pytest
+python -m pytest -q
+
+# Or run with the full venv path (without activation)
+.venv/bin/pytest -q
+```
+
+**Expected Output:**
+```
+.....................................                                                                                                                                                        [100%]
+37 passed in 0.15s
+```
+
+**Running Specific Tests:**
+
+```bash
+# Activate the virtual environment first
+source .venv/bin/activate
+
+# Run with verbose output
+pytest -v
+
+# Run a specific test
+pytest test_harinezumigel_llm_stack.py::TestLLMStack::test_load_config -v
+
+# Run tests matching a pattern
+pytest -k "test_resolve" -v
+
+# Or use python -m pytest if pytest command not found
+python -m pytest -v
+```
+
+**Deactivating the Virtual Environment:**
+
+```bash
+deactivate
+```
+
+**Quick Test Command (No Activation Required):**
+
+If you prefer not to activate the virtual environment, use the full path:
+
+```bash
+.venv/bin/pytest -q
+```
+
+**Note:** The virtual environment (`.venv/`) is only needed for development and testing. The production installation uses a separate virtual environment at `/opt/litellm/venv` for the LiteLLM proxy.
+
 ## Contributing
 
 Contributions welcome! Please:
 
 1. Fork the repository
 2. Create a feature branch
-3. Add tests if applicable
+3. Add tests if applicable (see "Development and Testing" section above)
 4. Update documentation
 5. Submit a pull request
 

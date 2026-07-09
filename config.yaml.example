@@ -30,6 +30,10 @@ model_list:
       max_num_seqs: 8
       max_num_batched_tokens: 2048
       dtype: auto
+      cache_creation_input_token_cost: 0
+      cache_read_input_token_cost: 0
+      input_cost_per_token: 0
+      output_cost_per_token: 0
       description: "Llama Guard 3 8B safety/moderation model"
       alias: "guard"
       license: "See upstream model license"
@@ -58,6 +62,10 @@ model_list:
       max_num_batched_tokens: 16384
       enable_prefix_caching: true
       dtype: auto
+      cache_creation_input_token_cost: 0
+      cache_read_input_token_cost: 0
+      input_cost_per_token: 0
+      output_cost_per_token: 0
       description: "Llama 3.1 8B fast general-purpose model"
       alias: "llama"
       license: "See upstream model license"
@@ -86,6 +94,10 @@ model_list:
       max_num_batched_tokens: 16384
       enable_prefix_caching: true
       dtype: auto
+      cache_creation_input_token_cost: 0
+      cache_read_input_token_cost: 0
+      input_cost_per_token: 0
+      output_cost_per_token: 0
       description: "Mistral 7B fast lightweight fallback model"
       alias: "mistral"
       license: "See upstream model license"
@@ -119,6 +131,10 @@ model_list:
       enable_prefix_caching: true
       attention_backend: flashinfer
       dtype: auto
+      cache_creation_input_token_cost: 0
+      cache_read_input_token_cost: 0
+      input_cost_per_token: 0
+      output_cost_per_token: 0
       description: "Qwen2.5 32B AWQ 4-bit"
       alias: "qwen32"
       license: "See upstream model license"
@@ -157,6 +173,10 @@ model_list:
       enforce_eager: false
 
       dtype: auto
+      cache_creation_input_token_cost: 0
+      cache_read_input_token_cost: 0
+      input_cost_per_token: 0
+      output_cost_per_token: 0
       description: "Qwen3-Coder-Next AWQ big-context profile"
       alias: "coder"
       license: "See upstream model license"
@@ -195,6 +215,10 @@ model_list:
       tool_call_parser: qwen3_coder
 
       dtype: auto
+      cache_creation_input_token_cost: 0
+      cache_read_input_token_cost: 0
+      input_cost_per_token: 0
+      output_cost_per_token: 0
       description: "Qwen3.6 27B balanced coding/chat profile"
       alias: "chat"
       license: "See upstream model license"
@@ -229,6 +253,10 @@ model_list:
       enforce_eager: false
 
       dtype: auto
+      cache_creation_input_token_cost: 0
+      cache_read_input_token_cost: 0
+      input_cost_per_token: 0
+      output_cost_per_token: 0
       description: "DeepSeek-Coder 6.7B fast coding/RAG model"
       alias: "fast-coder"
       license: "See upstream model license"
@@ -268,6 +296,10 @@ model_list:
       enforce_eager: false
 
       dtype: auto
+      cache_creation_input_token_cost: 0
+      cache_read_input_token_cost: 0
+      input_cost_per_token: 0
+      output_cost_per_token: 0
 
       description: "DeepSeek-V4-Pro-70b frontier reasoning/coding profile (1M context)"
       alias: "reasoning"
