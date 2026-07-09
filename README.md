@@ -4,6 +4,8 @@ A Python CLI tool for managing [LiteLLM](https://github.com/BerriAI/litellm) pro
 
 ⚠️ **Disclaimer**: This project is provided "as is" without warranty of any kind and is not intended for production use without proper validation and testing. This project is not affiliated with LLMStack (llmstack.ai / Promptly).
 
+> **⚠️ Security notice**: LiteLLM always serves the admin web UI at `/ui` regardless of configuration. The `DISABLE_ADMIN_UI` environment variable only disables the SSO login flow — it does **not** prevent the page from loading. Restrict access to the LiteLLM port at the network or reverse proxy level if you do not want the UI reachable.
+
 ## Overview
 
 `harinezumigel-llm-stack` provides a unified interface to orchestrate multiple language model deployments using:
@@ -135,6 +137,11 @@ LITELLM_BIN=/opt/litellm/venv/bin/litellm
 # LiteLLM proxy bind
 LITELLM_BIND_HOST=0.0.0.0
 LITELLM_PORT=4000
+
+# Disable LiteLLM admin UI (default: True for security)
+# LiteLLM requires capitalized True/False for this variable
+# Set to False to enable the web UI at http://<host>:<port>/ui
+DISABLE_ADMIN_UI=True
 
 # Shared vLLM host / bind
 VLLM_HOST=localhost
@@ -312,6 +319,10 @@ harinezumigel-llm-stack litellm --stop
 
 The proxy will be available at `http://localhost:4000` (or your configured port).
 
+**Admin UI**: The `/ui` route is always served by LiteLLM (static files). `DISABLE_ADMIN_UI=True` only disables the SSO login flow — it does **not** prevent the page from loading. All API calls require `LITELLM_MASTER_KEY` for authentication regardless.
+
+To block `/ui` access at the network level, use a reverse proxy (e.g. nginx `location /ui { return 403; }`) or a firewall rule.
+
 **Note**: When using `--show-log`, JSON log lines with `stacktrace` fields are automatically formatted to display stack traces with real newlines for readability.
 
 ### View Logs
@@ -475,6 +486,7 @@ Starting vLLM container for model: Qwen3-Coder-Next-AWQ
 - **Process safety**: Kills only LiteLLM processes matching specific patterns
 - **Port validation**: Checks port availability before binding
 - **Self-protection**: Won't kill its own process when stopping LiteLLM
+- **API authentication**: All LiteLLM API calls require `LITELLM_MASTER_KEY`; the `/ui` static files load but are non-functional without auth
 
 See [SECURITY.md](SECURITY.md) for vulnerability reporting and security scope.
 
