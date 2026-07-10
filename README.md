@@ -183,7 +183,7 @@ model_list:
       temperature: 0.0
       top_p: 1.0
     model_info:
-      model_dir: llama-guard-3-8b
+      model_dir: llama-guard3-8b
       context_length: 2048
       max_input_tokens: 1536
       max_output_tokens: 64
@@ -192,7 +192,14 @@ model_list:
       max_num_seqs: 8
       max_num_batched_tokens: 2048
       dtype: auto
+      cache_creation_input_token_cost: 0
+      cache_read_input_token_cost: 0
+      input_cost_per_token: 0
+      output_cost_per_token: 0
       description: "Llama Guard 3 8B safety/moderation model"
+      alias: "guard"
+      license: "See upstream model license"
+      upstream: "https://huggingface.co/meta-llama/Llama-Guard-3-8B"
 
   # Primary coding / agentic model
   - model_name: Qwen3-Coder-Next-AWQ
@@ -206,9 +213,9 @@ model_list:
       top_p: 0.9
       top_k: 20
     model_info:
-      alias: coder  # Optional: short alias for command-line use
       model_dir: Qwen3-Coder-Next-AWQ
-      context_length: 262144
+
+      context_length:   262144
       max_input_tokens: 250000
       max_output_tokens: 4096
       max_tokens: 4096
@@ -223,8 +230,16 @@ model_list:
       enable_prefix_caching: true
       attention_backend: flashinfer
       enforce_eager: false
+
       dtype: auto
+      cache_creation_input_token_cost: 0
+      cache_read_input_token_cost: 0
+      input_cost_per_token: 0
+      output_cost_per_token: 0
       description: "Qwen3-Coder-Next AWQ big-context profile"
+      alias: "coder"
+      license: "See upstream model license"
+      upstream: "https://huggingface.co/Qwen/Qwen3-Coder-Next"
 
 router_settings:
   routing_strategy: simple-shuffle
