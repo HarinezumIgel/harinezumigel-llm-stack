@@ -1974,6 +1974,10 @@ Current model values from LiteLLM config:
             self.list_models()
             return
 
+        if args.stop and (args.show_log or args.follow):
+            print("ERROR: --show-log and --follow are not allowed with --stop")
+            sys.exit(1)
+
         if self.handle_logs(args):
             return
 
@@ -1986,10 +1990,6 @@ Current model values from LiteLLM config:
 
         if args.recreate and args.stop:
             print("ERROR: --recreate is not allowed when --stop is given")
-            sys.exit(1)
-
-        if args.stop and (args.show_log or args.follow):
-            print("ERROR: --show-log and --follow are not allowed with --stop")
             sys.exit(1)
 
         if self.handle_stop(args):
