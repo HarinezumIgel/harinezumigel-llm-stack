@@ -57,3 +57,4 @@ htmlcov/
 
 # Deployment
 push-to-github.sh
+deploy.py

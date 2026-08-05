@@ -223,7 +223,6 @@ class TestUtilityFunctions(unittest.TestCase):
         self.assertTrue(as_bool("True"))
         self.assertTrue(as_bool("1"))
         self.assertTrue(as_bool("yes"))
-        self.assertTrue(as_bool("y"))
         self.assertTrue(as_bool("on"))
 
         # Test falsy values
@@ -231,6 +230,7 @@ class TestUtilityFunctions(unittest.TestCase):
         self.assertFalse(as_bool("false"))
         self.assertFalse(as_bool("0"))
         self.assertFalse(as_bool("no"))
+        self.assertFalse(as_bool("y"))  # 'y' removed from truthy set
         self.assertFalse(as_bool(""))
         self.assertFalse(as_bool(None))
 
@@ -632,6 +632,7 @@ class TestLLMStackModelResolution(unittest.TestCase):
             api_key="test",
             api_base_host="localhost",
             api_base_port=8001,
+            litellm_params={},
             model_info={},
             context_length=4096,
             max_input_tokens=3000,
@@ -642,6 +643,9 @@ class TestLLMStackModelResolution(unittest.TestCase):
             license=None,
             upstream=None,
             alias=None,
+            description=None,
+            detail=None,
+            allow_rebuild=True,
         )
         stack.models["test_model"] = test_model
 
@@ -664,6 +668,7 @@ class TestLLMStackModelResolution(unittest.TestCase):
             api_key="test",
             api_base_host="localhost",
             api_base_port=8001,
+            litellm_params={},
             model_info={},
             context_length=4096,
             max_input_tokens=3000,
@@ -674,6 +679,9 @@ class TestLLMStackModelResolution(unittest.TestCase):
             license=None,
             upstream=None,
             alias="mistral",
+            description=None,
+            detail=None,
+            allow_rebuild=True,
         )
         stack.models["mistral_7b_instruct"] = test_model1
 
@@ -684,6 +692,371 @@ class TestLLMStackModelResolution(unittest.TestCase):
         # Non-matching partial should return None
         resolved = stack._resolve_model_name("mist")
         self.assertIsNone(resolved)
+
+
+class TestFormatSamplingParameters(unittest.TestCase):
+    """Test format_sampling_parameters utility."""
+
+    def test_override_takes_precedence(self):
+        """override_generation_config values are labeled as 'model-spec'."""
+        from harinezumigel_llm_stack import format_sampling_parameters  # type: ignore
+
+        result = format_sampling_parameters(
+            {"temperature": 0.5, "top_p": 0.9},
+            {"temperature": 0.7},
+        )
+        self.assertIn("temperature=0.5(model-spec)", result)
+        self.assertIn("top_p=0.9(model-spec)", result)
+
+    def test_litellm_params_fallback(self):
+        """litellm_params values are used and labeled 'litellm' when no override."""
+        from harinezumigel_llm_stack import format_sampling_parameters  # type: ignore
+
+        result = format_sampling_parameters(
+            {},
+            {"temperature": 0.2, "top_k": 20},
+        )
+        self.assertIn("temperature=0.2(litellm)", result)
+        self.assertIn("top_k=20(litellm)", result)
+
+    def test_empty_params_returns_empty_list(self):
+        """No params configured returns empty list."""
+        from harinezumigel_llm_stack import format_sampling_parameters  # type: ignore
+
+        result = format_sampling_parameters({}, {})
+        self.assertEqual(result, [])
+
+
+class TestSafetyGuards(unittest.TestCase):
+    """Test that destructive operations are properly guarded."""
+
+    def setUp(self):
+        self.env_vars = {
+            "LITELLM_CONFIG": "/opt/litellm/config.yaml",
+            "MODEL_ROOT": "/models",
+            "LITELLM_VENV_ACTIVATE": "/opt/litellm/venv/bin/activate",
+            "LITELLM_BIN": "/opt/litellm/venv/bin/litellm",
+            "LITELLM_BIND_HOST": "0.0.0.0",
+            "LITELLM_PORT": "4000",
+            "VLLM_HOST": "localhost",
+            "VLLM_BIND_HOST": "0.0.0.0",
+            "VLLM_CONTAINER_PORT": "8000",
+            "VLLM_DOCKER_IMAGE": "vllm/vllm-openai:latest",
+            "VLLM_MODEL_VOLUME": "/models:/models:ro",
+            "VLLM_CACHE_VOLUME": "/cache:/cache",
+            "VLLM_AUTO_PORT_START": "8001",
+            "VLLM_AUTO_PORT_END": "8010",
+        }
+        for key, value in self.env_vars.items():
+            os.environ[key] = value
+
+    def tearDown(self):
+        for key in self.env_vars:
+            os.environ.pop(key, None)
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    def test_duplicate_alias_exits(self, mock_load: Any) -> None:
+        """Duplicate aliases in config cause sys.exit(1)."""
+        import tempfile
+        import yaml  # type: ignore
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
+
+        config_data = {
+            "model_list": [
+                {
+                    "model_name": "model_a",
+                    "litellm_params": {
+                        "model": "openai/model_a",
+                        "api_base": "http://localhost:8001/v1",
+                        "api_key": "sk-test",
+                    },
+                    "model_info": {
+                        "alias": "myalias",
+                        "context_length": 4096,
+                        "max_input_tokens": 3000,
+                        "max_output_tokens": 512,
+                        "gpu_memory_utilization": 0.9,
+                    },
+                },
+                {
+                    "model_name": "model_b",
+                    "litellm_params": {
+                        "model": "openai/model_b",
+                        "api_base": "http://localhost:8002/v1",
+                        "api_key": "sk-test",
+                    },
+                    "model_info": {
+                        "alias": "myalias",  # duplicate
+                        "context_length": 4096,
+                        "max_input_tokens": 3000,
+                        "max_output_tokens": 512,
+                        "gpu_memory_utilization": 0.9,
+                    },
+                },
+            ]
+        }
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            yaml.dump(config_data, f)
+            temp_config = f.name
+
+        try:
+            os.environ["LITELLM_CONFIG"] = temp_config
+            config = AppConfig.from_env()
+            stack = LLMStack(config)
+            with self.assertRaises(SystemExit):
+                stack.load_models()
+        finally:
+            os.unlink(temp_config)
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    def test_recreate_requires_start(self, mock_load: Any) -> None:
+        """--recreate without --start must exit with an error."""
+        import argparse
+        import tempfile
+        import yaml  # type: ignore
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
+
+        config_data = {
+            "model_list": [
+                {
+                    "model_name": "my_model",
+                    "litellm_params": {
+                        "model": "openai/my_model",
+                        "api_base": "http://localhost:8001/v1",
+                        "api_key": "sk-test",
+                    },
+                    "model_info": {
+                        "context_length": 4096,
+                        "max_input_tokens": 3000,
+                        "max_output_tokens": 512,
+                        "gpu_memory_utilization": 0.9,
+                    },
+                }
+            ]
+        }
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            yaml.dump(config_data, f)
+            temp_config = f.name
+
+        try:
+            os.environ["LITELLM_CONFIG"] = temp_config
+            config = AppConfig.from_env()
+            stack = LLMStack(config)
+
+            args = argparse.Namespace(
+                model="my_model",
+                start=False,
+                stop=False,
+                recreate=True,
+                no_reuse_existing=False,
+                dry_run=False,
+                show_log=False,
+                show_log_path=False,
+                clean_log=False,
+                follow=False,
+                tail="200",
+                ps=False,
+                list=False,
+                help=False,
+                port=None,
+                auto_port=False,
+                context_length=None,
+                max_input_tokens=None,
+                max_output_tokens=None,
+                gpu_memory_utilization=None,
+                max_num_seqs=None,
+                dtype=None,
+            )
+
+            with self.assertRaises(SystemExit):
+                stack.run(args)
+        finally:
+            os.unlink(temp_config)
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    def test_recreate_not_allowed_with_stop(self, mock_load: Any) -> None:
+        """--recreate with --stop must exit with an error."""
+        import argparse
+        import tempfile
+        import yaml  # type: ignore
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
+
+        config_data = {
+            "model_list": [
+                {
+                    "model_name": "my_model",
+                    "litellm_params": {
+                        "model": "openai/my_model",
+                        "api_base": "http://localhost:8001/v1",
+                        "api_key": "sk-test",
+                    },
+                    "model_info": {
+                        "context_length": 4096,
+                        "max_input_tokens": 3000,
+                        "max_output_tokens": 512,
+                        "gpu_memory_utilization": 0.9,
+                    },
+                }
+            ]
+        }
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            yaml.dump(config_data, f)
+            temp_config = f.name
+
+        try:
+            os.environ["LITELLM_CONFIG"] = temp_config
+            config = AppConfig.from_env()
+            stack = LLMStack(config)
+
+            args = argparse.Namespace(
+                model="my_model",
+                start=False,
+                stop=True,
+                recreate=True,
+                no_reuse_existing=False,
+                dry_run=False,
+                show_log=False,
+                show_log_path=False,
+                clean_log=False,
+                follow=False,
+                tail="200",
+                ps=False,
+                list=False,
+                help=False,
+                port=None,
+                auto_port=False,
+                context_length=None,
+                max_input_tokens=None,
+                max_output_tokens=None,
+                gpu_memory_utilization=None,
+                max_num_seqs=None,
+                dtype=None,
+            )
+
+            with self.assertRaises(SystemExit):
+                stack.run(args)
+        finally:
+            os.unlink(temp_config)
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    def test_recreate_not_allowed_for_litellm(self, mock_load: Any) -> None:
+        """--recreate is never allowed for the litellm target."""
+        import argparse
+        import tempfile
+        import yaml  # type: ignore
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
+
+        config_data = {"model_list": []}
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            yaml.dump(config_data, f)
+            temp_config = f.name
+
+        try:
+            os.environ["LITELLM_CONFIG"] = temp_config
+            config = AppConfig.from_env()
+            stack = LLMStack(config)
+
+            for model_name in ("litellm", "llm-lite", "lite-llm"):
+                for start, stop in ((True, False), (False, True), (False, False)):
+                    args = argparse.Namespace(
+                        model=model_name,
+                        start=start,
+                        stop=stop,
+                        recreate=True,
+                        no_reuse_existing=False,
+                        dry_run=False,
+                        show_log=False,
+                        show_log_path=False,
+                        clean_log=False,
+                        follow=False,
+                        tail="200",
+                        ps=False,
+                        list=False,
+                        help=False,
+                        port=None,
+                        auto_port=False,
+                        context_length=None,
+                        max_input_tokens=None,
+                        max_output_tokens=None,
+                        gpu_memory_utilization=None,
+                        max_num_seqs=None,
+                        dtype=None,
+                    )
+                    with self.assertRaises(SystemExit):
+                        stack.run(args)
+        finally:
+            os.unlink(temp_config)
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    def test_rebuild_false_blocks_recreate(self, mock_load: Any) -> None:
+        """rebuild: false in config.yaml must block --recreate for that model."""
+        import argparse
+        import tempfile
+        import yaml  # type: ignore
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
+
+        config_data = {
+            "model_list": [
+                {
+                    "model_name": "protected_model",
+                    "litellm_params": {
+                        "model": "openai/protected_model",
+                        "api_base": "http://localhost:8001/v1",
+                        "api_key": "sk-test",
+                    },
+                    "model_info": {
+                        "rebuild": False,
+                        "context_length": 4096,
+                        "max_input_tokens": 3000,
+                        "max_output_tokens": 512,
+                        "gpu_memory_utilization": 0.9,
+                    },
+                }
+            ]
+        }
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            yaml.dump(config_data, f)
+            temp_config = f.name
+
+        try:
+            os.environ["LITELLM_CONFIG"] = temp_config
+            config = AppConfig.from_env()
+            stack = LLMStack(config)
+
+            args = argparse.Namespace(
+                model="protected_model",
+                start=True,
+                stop=False,
+                recreate=True,
+                no_reuse_existing=False,
+                dry_run=False,
+                show_log=False,
+                show_log_path=False,
+                clean_log=False,
+                follow=False,
+                tail="200",
+                ps=False,
+                list=False,
+                help=False,
+                port=8001,
+                auto_port=False,
+                context_length=None,
+                max_input_tokens=None,
+                max_output_tokens=None,
+                gpu_memory_utilization=None,
+                max_num_seqs=None,
+                dtype=None,
+            )
+
+            with self.assertRaises(SystemExit):
+                stack.run(args)
+        finally:
+            os.unlink(temp_config)
 
 
 class TestRunCommand(unittest.TestCase):

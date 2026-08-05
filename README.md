@@ -24,6 +24,8 @@ The script manages the entire lifecycle of your LLM infrastructure:
 
 - **Configuration-driven**: All settings from `.env` and `config.yaml` (no hardcoded values)
 - **Model aliases**: Define short aliases for models (e.g., `coder` for `Qwen3-Coder-Next-AWQ`)
+- **Model descriptions**: Add `description` and `detail` fields for richer `--list` output
+- **Sampling parameter display**: Effective sampling parameters (from `override_generation_config` and `litellm_params`) are shown in `--list` and at LiteLLM startup, labeled by source (`model-spec` vs `litellm`)
 - **Dataclass-based configuration**: `LLMStack` class manages all state and lifecycle operations
 - **Dry-run mode**: Explicit flags for destructive operations, container reuse by default
 - **Port management**: Manual or automatic port allocation, runtime parameter overrides
@@ -197,6 +199,7 @@ model_list:
       input_cost_per_token: 0
       output_cost_per_token: 0
       description: "Llama Guard 3 8B safety/moderation model"
+      detail: "Meta Llama Guard 3 for content moderation tasks"
       alias: "guard"
       license: "See upstream model license"
       upstream: "https://huggingface.co/meta-llama/Llama-Guard-3-8B"
@@ -230,6 +233,10 @@ model_list:
       enable_prefix_caching: true
       attention_backend: flashinfer
       enforce_eager: false
+      override_generation_config:
+        temperature: 0.6
+        top_p: 0.95
+        top_k: 20
 
       dtype: auto
       cache_creation_input_token_cost: 0
@@ -237,6 +244,7 @@ model_list:
       input_cost_per_token: 0
       output_cost_per_token: 0
       description: "Qwen3-Coder-Next AWQ big-context profile"
+      detail: "262K context, fp8 KV cache, FlashInfer backend, tool-calling enabled"
       alias: "coder"
       license: "See upstream model license"
       upstream: "https://huggingface.co/Qwen/Qwen3-Coder-Next"
@@ -262,9 +270,11 @@ general_settings:
 
 ```bash
 harinezumigel-llm-stack --list
+# or simply (no arguments also shows the list):
+harinezumigel-llm-stack
 ```
 
-This displays all configured models with their settings, including any defined aliases.
+This displays all configured models with their settings, including any defined aliases and descriptions. The alias summary table shows each alias, the model it maps to, and a short description (from `model_info.description`).
 
 ### Start a Model Backend
 
@@ -418,6 +428,36 @@ model_info:
   model_dir: deepseek-v4-pro-70b      # deepseek-v4-pro-70b
 ```
 
+### Model `model_info` Reference
+
+| Field | Required | Description |
+|---|---|---|
+| `model_dir` | yes | Directory name inside `MODEL_ROOT` |
+| `context_length` | yes | Maximum total tokens (prompt + completion) |
+| `max_input_tokens` | yes | Maximum prompt tokens |
+| `max_output_tokens` | yes | Maximum completion tokens |
+| `gpu_memory_utilization` | yes | Fraction of GPU VRAM to allocate (0.0–1.0) |
+| `dtype` | no | Model weight dtype (`auto`, `float16`, `bfloat16`) |
+| `alias` | no | Short name for CLI commands (e.g. `coder`) |
+| `description` | no | One-line description shown in `--list` alias table |
+| `detail` | no | Longer detail line shown in full model listing |
+| `rebuild` | no | Set to `false` to block `--recreate` for this model (default: `true`) |
+| `override_generation_config` | no | Sampling parameters applied at the vLLM server level (e.g. `temperature`, `top_p`, `top_k`, `repetition_penalty`). Displayed in `--list` and at LiteLLM startup. |
+| `quantization` | no | Quantization scheme (e.g. `compressed-tensors`, `awq`) |
+| `kv_cache_dtype` | no | KV cache precision (e.g. `fp8`) |
+| `generation_config` | no | Generation config file or `vllm` |
+| `enable_prefix_caching` | no | Enable prefix/prompt caching |
+| `attention_backend` | no | Attention implementation (e.g. `flashinfer`) |
+| `enforce_eager` | no | Disable CUDA graphs |
+| `enable_auto_tool_choice` | no | Enable automatic tool/function calling |
+| `tool_call_parser` | no | Parser for tool calls (e.g. `qwen3_coder`) |
+| `max_num_seqs` | no | Maximum concurrent sequences |
+| `max_num_batched_tokens` | no | Maximum tokens per batch |
+| `license` | no | License identifier or URL |
+| `upstream` | no | Upstream model URL (e.g. HuggingFace page) |
+
+**Sampling parameters** (`override_generation_config`) are request-time parameters in vLLM — not server startup flags. They are passed in API requests and are shown in informational output. Parameters set in `litellm_params` (e.g. `temperature`, `top_p`) are also shown, labeled by source (`model-spec` vs `litellm`).
+
 ## Model Aliases
 
 You can define short, memorable aliases for models in `config.yaml` to simplify command-line usage. Aliases are optional and defined in the `model_info` section:
@@ -491,6 +531,9 @@ Starting vLLM container for model: Qwen3-Coder-Next-AWQ
 - **Dry-run mode**: Preview all changes with `--dry-run`
 - **Container reuse**: Default behavior reuses existing containers
 - **Scoped operations**: Only manages containers with `vllm-` prefix
+- **Recreate scoping**: `--recreate` only affects the single named model/alias; requires `--start`
+- **Alias safety**: Duplicate aliases are rejected at startup; unknown aliases exit with a clear error
+- **Rebuild protection**: Setting `rebuild: false` in `model_info` blocks `--recreate` for that model
 - **Process safety**: Kills only LiteLLM processes matching specific patterns
 - **Port validation**: Checks port availability before binding
 - **Self-protection**: Won't kill its own process when stopping LiteLLM
@@ -508,7 +551,7 @@ Always use host-mounted directories or Docker volumes for persistence.
 ### Default Behavior (Safe)
 
 ```bash
-harinezumigel-llm-stack mistral-7b
+harinezumigel-llm-stack mistral-7b --start
 ```
 
 1. Checks if container `vllm-mistral-7b-8001` exists
@@ -519,12 +562,14 @@ harinezumigel-llm-stack mistral-7b
 ### Recreate Behavior
 
 ```bash
-harinezumigel-llm-stack mistral-7b --recreate
+harinezumigel-llm-stack mistral-7b --start --recreate
 ```
 
 1. Stops existing container (if running)
 2. Removes container
 3. Creates fresh container with current settings
+
+> `--recreate` **only** affects the single model or alias explicitly named on the command line. It requires `--start` and will exit with an error if used without it. All other containers are left untouched.
 
 Use `--recreate` when:
 - Changing Docker run parameters
@@ -724,7 +769,7 @@ model_info:
 
 ### Running Tests
 
-The project includes a comprehensive test suite (`test_harinezumigel_llm_stack.py`) with 37 tests covering configuration parsing, model resolution, Docker command generation, and more.
+The project includes a comprehensive test suite (`test_harinezumigel_llm_stack.py`) with 43 tests covering configuration parsing, model resolution, Docker command generation, sampling parameter formatting, and safety guards.
 
 **Requirements:**
 - Python 3.10+
@@ -763,8 +808,8 @@ python -m pytest -q
 
 **Expected Output:**
 ```
-.....................................                                                                                                                                                        [100%]
-37 passed in 0.15s
+..........................................                                   [100%]
+43 passed in 0.16s
 ```
 
 **Running Specific Tests:**

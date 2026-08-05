@@ -164,7 +164,7 @@ echo
 echo "Setting up /opt/litellm directory structure..."
 if [[ -d "$INSTALL_DIR" ]]; then
     echo -e "${YELLOW}⚠${NC} Directory $INSTALL_DIR already exists"
-    echo "  Existing files will be preserved, but configuration files will not be overwritten."
+    echo "  Existing .env and config.yaml will be backed up (with date) and overwritten."
     read -p "Continue? [y/N] " -n 1 -r
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
@@ -172,7 +172,12 @@ if [[ -d "$INSTALL_DIR" ]]; then
         exit 1
     fi
 else
-    echo "  Creating $INSTALL_DIR..."
+    read -p "Create $INSTALL_DIR? [y/N] " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo "Aborted."
+        exit 1
+    fi
     sudo mkdir -p "$INSTALL_DIR"
     sudo chown $USER:$USER "$INSTALL_DIR"
     echo -e "${GREEN}✓${NC} Created $INSTALL_DIR"
@@ -187,27 +192,46 @@ echo
 echo "Copying example configuration files to $INSTALL_DIR..."
 echo
 
-if [[ ! -f "$INSTALL_DIR/.env" ]]; then
-    echo "  Creating .env file from example..."
-    cp "$SCRIPT_DIR/.env.example" "$INSTALL_DIR/.env"
-    echo -e "${GREEN}✓${NC} Created $INSTALL_DIR/.env"
-    echo "  → You must edit this file with your paths and API keys"
-    echo "  → Run: ${YELLOW}nano $INSTALL_DIR/.env${NC} (or your preferred editor)"
+_bak_date=$(date +%Y%m%d)
+if [[ -f "$SCRIPT_DIR/.env.example" ]]; then
+    read -p "Copy .env.example to $INSTALL_DIR/.env? [y/N] " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        if [[ -f "$INSTALL_DIR/.env" ]]; then
+            echo "  Backing up existing .env to .env_${_bak_date}.bak ..."
+            cp "$INSTALL_DIR/.env" "$INSTALL_DIR/.env_${_bak_date}.bak"
+            echo -e "${GREEN}✓${NC} Backed up to $INSTALL_DIR/.env_${_bak_date}.bak"
+        fi
+        cp "$SCRIPT_DIR/.env.example" "$INSTALL_DIR/.env"
+        echo -e "${GREEN}✓${NC} Created $INSTALL_DIR/.env"
+        echo "  → You must edit this file with your paths and API keys"
+        echo "  → Run: ${YELLOW}nano $INSTALL_DIR/.env${NC} (or your preferred editor)"
+    else
+        echo "  Skipping .env."
+    fi
 else
-    echo -e "${GREEN}✓${NC} $INSTALL_DIR/.env already exists (not overwritten)"
-    echo "  → Your existing configuration is preserved"
+    echo -e "${YELLOW}⚠${NC} .env.example not found in $SCRIPT_DIR — skipping"
 fi
 echo
 
-if [[ ! -f "$INSTALL_DIR/config.yaml" ]]; then
-    echo "  Creating config.yaml file from example..."
-    cp "$SCRIPT_DIR/config.yaml.example" "$INSTALL_DIR/config.yaml"
-    echo -e "${GREEN}✓${NC} Created $INSTALL_DIR/config.yaml"
-    echo "  → You must edit this file to configure your models"
-    echo "  → Run: ${YELLOW}nano $INSTALL_DIR/config.yaml${NC} (or your preferred editor)"
+if [[ -f "$SCRIPT_DIR/config.yaml.example" ]]; then
+    read -p "Copy config.yaml.example to $INSTALL_DIR/config.yaml? [y/N] " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        if [[ -f "$INSTALL_DIR/config.yaml" ]]; then
+            echo "  Backing up existing config.yaml to config.yaml_${_bak_date}.bak ..."
+            cp "$INSTALL_DIR/config.yaml" "$INSTALL_DIR/config.yaml_${_bak_date}.bak"
+            echo -e "${GREEN}✓${NC} Backed up to $INSTALL_DIR/config.yaml_${_bak_date}.bak"
+        fi
+        cp "$SCRIPT_DIR/config.yaml.example" "$INSTALL_DIR/config.yaml"
+        echo -e "${GREEN}✓${NC} Created $INSTALL_DIR/config.yaml"
+        echo "  → You must edit this file to configure your models"
+        echo "  → Run: ${YELLOW}nano $INSTALL_DIR/config.yaml${NC} (or your preferred editor)"
+    else
+        echo "  Skipping config.yaml."
+    fi
 else
-    echo -e "${GREEN}✓${NC} $INSTALL_DIR/config.yaml already exists (not overwritten)"
-    echo "  → Your existing configuration is preserved"
+    echo -e "${YELLOW}⚠${NC} config.yaml.example not found in $SCRIPT_DIR — skipping"
 fi
 echo
 
@@ -283,19 +307,10 @@ if [[ -d "$VENV_PATH" ]]; then
         echo
         if "$VENV_PATH/bin/pip" install --upgrade 'litellm[proxy]'; then
             echo -e "${GREEN}✓${NC} litellm[proxy] installed/upgraded successfully"
+            # litellm proxy is incompatible with fastapi>=0.115 (get_flat_dependant removed)
+            "$VENV_PATH/bin/pip" install 'fastapi<0.115.0' 'sse-starlette<2.0.0' --quiet
             echo
             echo "Updating .env with venv activation path..."
-            if grep -q "^LITELLM_VENV_ACTIVATE=" "$INSTALL_DIR/.env" 2>/dev/null; then
-                sed -i.bak "s|^LITELLM_VENV_ACTIVATE=.*|LITELLM_VENV_ACTIVATE=$VENV_PATH/bin/activate|" "$INSTALL_DIR/.env" \
-                    && rm -f "$INSTALL_DIR/.env.bak"
-            else
-                echo "LITELLM_VENV_ACTIVATE=$VENV_PATH/bin/activate" >> "$INSTALL_DIR/.env"
-            fi
-            echo -e "${GREEN}✓${NC} .env file updated with venv path"
-        else
-            echo -e "${RED}✗${NC} Failed to install/upgrade litellm[proxy]"
-            echo "  You can install it manually later with:"
-            echo "  source $VENV_PATH/bin/activate && pip install --upgrade 'litellm[proxy]'"
         fi
     else
         echo "Skipping virtual environment setup."
@@ -325,6 +340,8 @@ else
             echo
             if "$VENV_PATH/bin/pip" install 'litellm[proxy]'; then
                 echo -e "${GREEN}✓${NC} litellm[proxy] installed successfully"
+                # litellm proxy is incompatible with fastapi>=0.115 (get_flat_dependant removed)
+                "$VENV_PATH/bin/pip" install 'fastapi<0.115.0' 'sse-starlette<2.0.0' --quiet
                 echo
                 echo "Updating .env with venv activation path..."
                 if grep -q "^LITELLM_VENV_ACTIVATE=" "$INSTALL_DIR/.env" 2>/dev/null; then

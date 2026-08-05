@@ -114,6 +114,8 @@ from urllib.parse import ParseResult, urlparse
 
 import yaml
 
+__version__ = "1.2.0/50 08/05/2026"
+
 
 # Default environment file path (can be overridden via HLS_ENV_FILE)
 BOOTSTRAP_ENV_FILE = os.environ.get("HLS_ENV_FILE", "/opt/litellm/.env")
@@ -348,9 +350,39 @@ def as_bool(value: Any, default: bool = False) -> bool:
         return value
 
     if isinstance(value, str):
-        return value.strip().lower() in ("1", "true", "yes", "y", "on")
+        return value.lower() in ("true", "1", "yes", "on")
 
     return bool(value)
+
+
+def format_sampling_parameters(
+    override_gen_config: dict[str, Any], litellm_params: dict[str, Any]
+) -> list[str]:
+    """Format sampling parameters with source labels.
+
+    Args:
+        override_gen_config: Parameters from model_info.override_generation_config
+        litellm_params: Parameters from litellm_params
+
+    Returns:
+        List of formatted strings like "temperature=0.7(litellm)"
+    """
+    sampling_parts: list[str] = []
+    for param_name in [
+        "temperature",
+        "top_p",
+        "top_k",
+        "repetition_penalty",
+        "presence_penalty",
+        "frequency_penalty",
+    ]:
+        override_val = override_gen_config.get(param_name)
+        litellm_val = litellm_params.get(param_name)
+        final_val = override_val if override_val is not None else litellm_val
+        if final_val is not None:
+            source = "model-spec" if override_val is not None else "litellm"
+            sampling_parts.append(f"{param_name}={final_val}({source})")
+    return sampling_parts
 
 
 def port_in_use(port: int, host: str) -> bool:
@@ -501,6 +533,7 @@ class ModelDeployment:  # pylint: disable=too-many-instance-attributes
     api_key: str
     api_base_host: str
     api_base_port: int | None
+    litellm_params: dict[str, Any]
     model_info: dict[str, Any]
     context_length: int
     max_input_tokens: int
@@ -511,6 +544,9 @@ class ModelDeployment:  # pylint: disable=too-many-instance-attributes
     license: str | None
     upstream: str | None
     alias: str | None
+    description: str | None
+    detail: str | None
+    allow_rebuild: bool
 
 
 @dataclass(frozen=True)
@@ -601,6 +637,9 @@ class LLMStack:
             license_info = model_info.get("license")
             upstream = model_info.get("upstream")
             alias = model_info.get("alias") or None
+            description = model_info.get("description")
+            detail = model_info.get("detail")
+            allow_rebuild = as_bool(model_info.get("rebuild", True))
 
             if api_base:
                 api_base_host, api_base_port = self._parse_api_base(api_base)
@@ -614,6 +653,7 @@ class LLMStack:
                 api_key=api_key,
                 api_base_host=api_base_host,
                 api_base_port=api_base_port,
+                litellm_params=params,
                 model_info=model_info,
                 context_length=require_model_int(model_name, model_info, "context_length"),
                 max_input_tokens=require_model_int(model_name, model_info, "max_input_tokens"),
@@ -626,6 +666,9 @@ class LLMStack:
                 license=license_info,
                 upstream=upstream,
                 alias=alias,
+                description=description,
+                detail=detail,
+                allow_rebuild=allow_rebuild,
             )
 
         # Validate alias uniqueness
@@ -915,6 +958,7 @@ class LLMStack:
             "quantization",
             "kv_cache_dtype",
             "generation_config",
+            "override_generation_config",
             "max_num_batched_tokens",
             "max_num_seqs",
             "attention_backend",
@@ -932,6 +976,10 @@ class LLMStack:
             print(f"{model.name}")
             if model.alias:
                 print(f"  alias:                    {model.alias}")
+            if model.description:
+                print(f"  description:              {model.description}")
+            if model.detail:
+                print(f"  detail:                   {model.detail}")
             print(f"  api_base:                 {model.api_base}")
             print(f"  api_base_host:            {model.api_base_host}")
             print(f"  api_base_port:            {model.api_base_port}")
@@ -960,22 +1008,24 @@ class LLMStack:
 
             print()
 
-        aliases = [(m.alias, m.name) for m in self.models.values() if m.alias]
+        aliases = [(m.alias, m.name, m.description) for m in self.models.values() if m.alias]
         if aliases:
-            col = max(len(a) for a, _ in aliases)
+            col_alias = max(len(a) for a, _, _ in aliases)
+            col_name = max(len(n) for _, n, _ in aliases)
             print("Aliases")
             print("-------")
-            for alias, model_name in aliases:
-                print(f"  {alias:<{col}}  →  {model_name}")
+            for alias, model_name, description in aliases:
+                desc_display = description or "(no description)"
+                print(f"  {alias:<{col_alias}}  →  {model_name:<{col_name}}  {desc_display}")
             print()
 
     def generate_help(self) -> str:
         """Generate dynamic help text."""
         keys = [
             "model_dir", "quantization", "kv_cache_dtype", "generation_config",
-            "max_num_batched_tokens", "max_num_seqs", "attention_backend",
-            "enable_prefix_caching", "enforce_eager", "enable_auto_tool_choice",
-            "tool_call_parser", "license", "upstream",
+            "override_generation_config", "max_num_batched_tokens", "max_num_seqs",
+            "attention_backend", "enable_prefix_caching", "enforce_eager",
+            "enable_auto_tool_choice", "tool_call_parser", "license", "upstream",
         ]
 
         model_lines: list[str] = []
@@ -1321,6 +1371,11 @@ Current model values from LiteLLM config:
         if raw_info.get("generation_config"):
             command.extend(["--generation-config", str(raw_info["generation_config"])])
 
+        # Note: Sampling parameters (temperature, top_p, top_k, repetition_penalty, etc.)
+        # are request-time parameters in vLLM, not server startup parameters.
+        # They should be passed in API requests, not as command-line flags.
+        # The parameters from config.yaml are used for display/documentation only.
+
         if raw_info.get("quantization"):
             command.extend(["--quantization", str(raw_info["quantization"])])
 
@@ -1376,6 +1431,15 @@ Current model values from LiteLLM config:
         print(f"Enable prefix caching:     {as_bool(raw_info.get('enable_prefix_caching', False))}")
         print(f"Attention backend:         {raw_info.get('attention_backend', '(default)')}")
         print(f"Generation config:         {raw_info.get('generation_config', '(model default)')}")
+
+        # Show sampling parameters
+        override_gen_config = cast(dict[str, Any], raw_info.get('override_generation_config') or {})
+        litellm_params = model.litellm_params or {}
+        sampling_info = format_sampling_parameters(override_gen_config, litellm_params)
+
+        if sampling_info:
+            print(f"Sampling parameters:       {', '.join(sampling_info)}")
+
         print(f"Auto tool choice:          {as_bool(raw_info.get('enable_auto_tool_choice', False))}")
         print(f"Tool call parser:          {raw_info.get('tool_call_parser', '(none)')}")
         print(f"Quantization:              {raw_info.get('quantization', '(none)')}")
@@ -1398,6 +1462,10 @@ Current model values from LiteLLM config:
         - Validates port availability before binding
         - Respects dry_run flag throughout
         """
+        if options.recreate and not model.allow_rebuild:
+            print(f"ERROR: --recreate is blocked for model '{model.name}' (rebuild: false in config.yaml)")
+            sys.exit(1)
+
         try:
             model_dir = self._find_model_dir(model, dry_run=options.dry_run)
         except RuntimeError as exc:
@@ -1567,6 +1635,9 @@ Current model values from LiteLLM config:
             f"set +a && "
             f"export LITELLM_LOG=INFO && "
             f"source {self.config.litellm_venv_activate} && "
+            # litellm CLI does bare `from proxy_server import` which only works when
+            # the proxy package directory is on PYTHONPATH
+            f"export PYTHONPATH=\"$(python -c 'import litellm,os;print(os.path.dirname(litellm.__file__)+\"/proxy\")')\" && "
             f"{self.config.litellm_bin} --config {self.config.litellm_config} "
             f"--host {self.config.litellm_bind_host} "
             f"--port {self.config.litellm_port}"
@@ -1576,6 +1647,22 @@ Current model values from LiteLLM config:
             f"\n=== Starting LiteLLM router on "
             f"{self.config.litellm_bind_host}:{self.config.litellm_port} ==="
         )
+        print(f"Config: {self.config.litellm_config}")
+        print()
+
+        # Display configured models with their sampling parameters
+        print("Configured models:")
+        for model_name, model in self.models.items():
+            raw_info = model.model_info
+            override_gen_config = cast(dict[str, Any], raw_info.get('override_generation_config') or {})
+            litellm_params = model.litellm_params or {}
+            sampling_parts = format_sampling_parameters(override_gen_config, litellm_params)
+
+            alias_str = f" (alias: {model.alias})" if model.alias else ""
+            sampling_str = f" [{', '.join(sampling_parts)}]" if sampling_parts else ""
+            print(f"  - {model_name}{alias_str}{sampling_str}")
+
+        print()
         print("Command:", command)
 
         if not dry_run:
@@ -1838,9 +1925,15 @@ Current model values from LiteLLM config:
         Safety: All destructive operations require explicit flags and respect
         dry-run mode. Default behavior is conservative (reuse, don't recreate).
         """
-        # Handle litellm target before loading model config (config not needed)
+        # Handle litellm target
         if args.model and args.model.lower() in ("litellm", "llm-lite", "lite-llm"):
+            if args.recreate:
+                print("ERROR: --recreate is not allowed for litellm")
+                sys.exit(1)
+
             if args.start:
+                # Load models to display their sampling parameters
+                self.load_models()
                 self.start_litellm(dry_run=args.dry_run, follow_log=args.show_log)
                 return
 
@@ -1867,12 +1960,20 @@ Current model values from LiteLLM config:
         if self.handle_ps(args):
             return
 
+        if args.recreate and (not args.start or not args.model):
+            print("ERROR: --recreate requires --start and a model or alias")
+            sys.exit(1)
+
+        if args.recreate and args.stop:
+            print("ERROR: --recreate is not allowed when --stop is given")
+            sys.exit(1)
+
         if self.handle_stop(args):
             return
 
         if not args.model:
-            print(self.generate_help())
-            sys.exit(1)
+            self.list_models()
+            return
 
         # Model specified — require an action
         if not args.start and not args.show_log and not args.show_log_path:
@@ -1884,10 +1985,6 @@ Current model values from LiteLLM config:
             print("  --show-log           View logs")
             print("  --show-log --follow  Follow logs")
             print("  --stop               Stop the container")
-            sys.exit(1)
-
-        if args.recreate and not args.start:
-            print("ERROR: --recreate can only be used together with --start")
             sys.exit(1)
 
         resolved = self._resolve_model_name(args.model)
@@ -1991,6 +2088,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     """Program entry point."""
+    msg = f" harinezumigel-llm-stack {__version__} "
+    border = "*" * (len(msg) + 2)
+    print(f"\n{border}\n*{msg}*\n{border}\n")
     LLMStack(APP).run(parse_args())
 
 
