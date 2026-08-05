@@ -192,7 +192,7 @@ echo
 echo "Copying example configuration files to $INSTALL_DIR..."
 echo
 
-_bak_date=$(date +%Y%m%d)
+_bak_date=$(date +%Y%m%d_%H%M%S)
 if [[ -f "$SCRIPT_DIR/.env.example" ]]; then
     read -p "Copy .env.example to $INSTALL_DIR/.env? [y/N] " -n 1 -r
     echo

@@ -100,6 +100,7 @@ License: MIT
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
 import re
@@ -115,6 +116,9 @@ from urllib.parse import ParseResult, urlparse
 import yaml
 
 __version__ = "1.2.0/50 08/05/2026"
+
+_RED = "\033[31m"
+_RESET = "\033[0m"
 
 
 # Default environment file path (can be overridden via HLS_ENV_FILE)
@@ -1141,6 +1145,7 @@ Current model values from LiteLLM config:
         tail: str = "200",
         follow: bool = False,
         show_log_path: bool = False,
+        since: str | None = None,
     ) -> None:
         """Show Docker logs for one container."""
         state = self._docker_container_state(container_name)
@@ -1156,7 +1161,10 @@ Current model values from LiteLLM config:
 
         print()
 
-        command = ["docker", "logs", "--tail", str(tail)]
+        if since is not None:
+            command = ["docker", "logs", "--since", since]
+        else:
+            command = ["docker", "logs", "--tail", str(tail)]
 
         if follow:
             command.append("-f")
@@ -1303,7 +1311,12 @@ Current model values from LiteLLM config:
                 result = run_command(["sudo", "truncate", "-s", "0", log_path], capture=True)
 
                 if result.returncode == 0:
+                    state = self._docker_container_state(container)
                     print("  Status:   ✓ Cleaned")
+                    if state == "running":
+                        # docker logs caches the old EOF offset; restart resets the reader
+                        print(f"{_RED}  Warning:  'docker logs' won't show new entries until the container is restarted.{_RESET}")
+                        print(f"{_RED}            Run: docker restart {container}{_RESET}")
                 else:
                     print(f"  Status:   ✗ Failed - {result.stderr.strip()}")
 
@@ -1859,7 +1872,7 @@ Current model values from LiteLLM config:
             print(f"  harinezumigel-llm-stack {target} --start --show-log")
             sys.exit(1)
 
-        self.show_vllm_logs(target, tail=args.tail, follow=args.follow, show_log_path=False)
+        self.show_vllm_logs(resolved, tail=args.tail, follow=args.follow, show_log_path=False)
         return True
 
     def handle_ps(self, args: argparse.Namespace) -> bool:
@@ -1929,6 +1942,10 @@ Current model values from LiteLLM config:
         if args.model and args.model.lower() in ("litellm", "llm-lite", "lite-llm"):
             if args.recreate:
                 print("ERROR: --recreate is not allowed for litellm")
+                sys.exit(1)
+
+            if args.clean_log or args.show_log_path:
+                print("ERROR: --clean-log and --show-log-path are not supported for litellm")
                 sys.exit(1)
 
             if args.start:
@@ -2014,6 +2031,7 @@ Current model values from LiteLLM config:
             sys.exit(1)
 
         if args.start:
+            log_since = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             self.start_vllm(
                 model,
                 StartOptions(
@@ -2039,9 +2057,9 @@ Current model values from LiteLLM config:
                 print()
                 self.show_container_logs(
                     container_name,
-                    tail=args.tail,
                     follow=True,
                     show_log_path=False,
+                    since=log_since,
                 )
 
 

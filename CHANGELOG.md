@@ -10,10 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - `install.sh`: ask user before creating `/opt/litellm` (previously only asked when directory already existed)
 - `install.sh`: ask user before copying each example config file individually
-- `install.sh`: back up existing `.env` and `config.yaml` to date-stamped `.bak` files before overwriting (e.g. `.env_20260805.bak`)
+- `install.sh`: back up existing `.env` and `config.yaml` to date-and-time-stamped `.bak` files before overwriting (e.g. `.env_20260805_143022.bak`)
 - `install.sh`: after installing `litellm[proxy]`, pin `fastapi<0.115.0` and `sse-starlette<2.0.0` to fix two incompatibilities with newer package versions
 
 ### Changed
+- `install.sh`: `.bak` filenames now include the time (`_HHMMSS`) in addition to the date, preventing collisions when backing up multiple times on the same day
 - `install.sh`: directory-exists prompt now states that config files will be backed up and overwritten (not preserved)
 
 ### Fixed
@@ -23,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `harinezumigel-llm-stack.py`: `start_litellm` command now sets `PYTHONPATH` to litellm's proxy directory before invoking the binary, fixing `ModuleNotFoundError: No module named 'proxy_server'`
 - `install.sh`: litellm proxy startup failure due to `ImportError: cannot import name 'get_flat_dependant'` — caused by `fastapi>=0.115` removing the symbol; fixed by pinning `fastapi<0.115.0`
 - `install.sh`: `sse-starlette` version conflict with pinned starlette resolved by adding `sse-starlette<2.0.0` to the pin step
+- `harinezumigel-llm-stack.py`: `--start --show-log` was dumping hundreds of lines of logs from previous container runs; fixed by using `docker logs --since <timestamp>` (captured just before start) instead of `--tail 200`
+- `harinezumigel-llm-stack.py`: `--show-log` was printing "Resolved alias" twice — fixed by passing the already-resolved model name to `show_vllm_logs` instead of the raw user input
+- `harinezumigel-llm-stack.py`: `--clean-log` now prints a red warning when the container is running, explaining that `docker logs` caches the old EOF offset and a `docker restart` is needed to see new entries
 
 ## [1.1.0] - 2026-07-07
 
