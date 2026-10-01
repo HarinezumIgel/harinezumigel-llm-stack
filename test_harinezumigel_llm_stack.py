@@ -39,6 +39,13 @@ sys.modules["harinezumigel_llm_stack"] = harinezumigel_llm_stack
 spec.loader.exec_module(harinezumigel_llm_stack)
 
 
+def safe_unlink(path: str | Path) -> None:
+    """Unlink a file path only when it exists."""
+    file_path = Path(path)
+    if file_path.exists():
+        file_path.unlink()
+
+
 class TestEnvironmentLoading(unittest.TestCase):
     """Test environment variable loading and parsing."""
 
@@ -60,7 +67,7 @@ class TestEnvironmentLoading(unittest.TestCase):
             self.assertEqual(os.environ.get("TEST_VAR2"), "value2")
             self.assertEqual(os.environ.get("TEST_VAR3"), "value3")
         finally:
-            os.unlink(temp_path)
+            safe_unlink(temp_path)
             # Clean up environment
             for key in ["TEST_VAR1", "TEST_VAR2", "TEST_VAR3"]:
                 os.environ.pop(key, None)
@@ -79,7 +86,7 @@ class TestEnvironmentLoading(unittest.TestCase):
             self.assertEqual(os.environ.get("EXPORT_VAR1"), "exported1")
             self.assertEqual(os.environ.get("EXPORT_VAR2"), "exported2")
         finally:
-            os.unlink(temp_path)
+            safe_unlink(temp_path)
             os.environ.pop("EXPORT_VAR1", None)
             os.environ.pop("EXPORT_VAR2", None)
 
@@ -99,7 +106,7 @@ class TestEnvironmentLoading(unittest.TestCase):
             self.assertEqual(os.environ.get("EXPANDED1"), "/opt/test/subdir")
             self.assertEqual(os.environ.get("EXPANDED2"), "/opt/test/another")
         finally:
-            os.unlink(temp_path)
+            safe_unlink(temp_path)
             os.environ.pop("BASE_DIR", None)
             os.environ.pop("EXPANDED1", None)
             os.environ.pop("EXPANDED2", None)
@@ -1027,7 +1034,7 @@ class TestSafetyGuards(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 stack.load_models()
         finally:
-            os.unlink(temp_config)
+            safe_unlink(temp_config)
 
     @patch("harinezumigel_llm_stack.load_env_file")
     def test_recreate_requires_start(self, mock_load: Any) -> None:
@@ -1093,7 +1100,7 @@ class TestSafetyGuards(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 stack.run(args)
         finally:
-            os.unlink(temp_config)
+            safe_unlink(temp_config)
 
     @patch("harinezumigel_llm_stack.load_env_file")
     def test_recreate_not_allowed_with_stop(self, mock_load: Any) -> None:
@@ -1159,7 +1166,7 @@ class TestSafetyGuards(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 stack.run(args)
         finally:
-            os.unlink(temp_config)
+            safe_unlink(temp_config)
 
     @patch("harinezumigel_llm_stack.load_env_file")
     def test_recreate_not_allowed_for_litellm(self, mock_load: Any) -> None:
@@ -1209,7 +1216,7 @@ class TestSafetyGuards(unittest.TestCase):
                     with self.assertRaises(SystemExit):
                         stack.run(args)
         finally:
-            os.unlink(temp_config)
+            safe_unlink(temp_config)
 
     @patch("harinezumigel_llm_stack.load_env_file")
     def test_rebuild_false_blocks_recreate(self, mock_load: Any) -> None:
@@ -1276,7 +1283,7 @@ class TestSafetyGuards(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 stack.run(args)
         finally:
-            os.unlink(temp_config)
+            safe_unlink(temp_config)
 
 
 class TestCLIParseArgs(unittest.TestCase):
