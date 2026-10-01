@@ -205,6 +205,8 @@ if [[ -f "$SCRIPT_DIR/.env.example" ]]; then
         cp "$SCRIPT_DIR/.env.example" "$INSTALL_DIR/.env"
         echo -e "${GREEN}✓${NC} Created $INSTALL_DIR/.env"
         echo "  → You must edit this file with your paths and API keys"
+        echo "  → IMPORTANT: Set VLLM_DOCKER_IMAGE to a tag that matches your NVIDIA driver"
+        echo "  → Check with: nvidia-smi (Driver Version), then see README.md"
         echo "  → Run: ${YELLOW}nano $INSTALL_DIR/.env${NC} (or your preferred editor)"
     else
         echo "  Skipping .env."
@@ -287,6 +289,37 @@ echo "LiteLLM requires a Python virtual environment with the 'litellm[proxy]' pa
 
 VENV_PATH="$INSTALL_DIR/venv"
 
+install_litellm_proxy_deps() {
+    local venv_path="$1"
+    local mode="$2"
+    local pip_bin="$venv_path/bin/pip"
+    local check_output
+
+    if [[ "$mode" == "upgrade" ]]; then
+        if ! "$pip_bin" install --upgrade "litellm[proxy]"; then
+            return 1
+        fi
+        echo -e "${GREEN}✓${NC} litellm[proxy] installed/upgraded successfully"
+    else
+        if ! "$pip_bin" install "litellm[proxy]"; then
+            return 1
+        fi
+        echo -e "${GREEN}✓${NC} litellm[proxy] installed successfully"
+    fi
+
+    # Keep dependency resolution owned by litellm[proxy]; explicit pinning here
+    # can create artificial conflicts as upstream dependencies evolve.
+    if check_output=$("$pip_bin" check 2>&1); then
+        echo -e "${GREEN}✓${NC} LiteLLM proxy dependency check passed"
+    else
+        echo -e "${YELLOW}⚠ Dependency check reported issues in $venv_path${NC}"
+        echo "$check_output"
+        echo -e "${YELLOW}  If this venv was reused, consider recreating $venv_path and running install.sh again.${NC}"
+    fi
+
+    return 0
+}
+
 if [[ -d "$VENV_PATH" ]]; then
     echo
     echo -e "${GREEN}✓${NC} Found existing virtual environment at $VENV_PATH"
@@ -305,10 +338,7 @@ if [[ -d "$VENV_PATH" ]]; then
         echo "Installing/upgrading litellm[proxy] package..."
         echo "This may take a few minutes. Please wait..."
         echo
-        if "$VENV_PATH/bin/pip" install --upgrade 'litellm[proxy]'; then
-            echo -e "${GREEN}✓${NC} litellm[proxy] installed/upgraded successfully"
-            # litellm proxy is incompatible with fastapi>=0.115 (get_flat_dependant removed)
-            "$VENV_PATH/bin/pip" install 'fastapi<0.115.0' 'sse-starlette<2.0.0' --quiet
+        if install_litellm_proxy_deps "$VENV_PATH" "upgrade"; then
             echo
             echo "Updating .env with venv activation path..."
         fi
@@ -338,10 +368,7 @@ else
             echo "Installing litellm[proxy] package..."
             echo "This may take a few minutes. Please wait..."
             echo
-            if "$VENV_PATH/bin/pip" install 'litellm[proxy]'; then
-                echo -e "${GREEN}✓${NC} litellm[proxy] installed successfully"
-                # litellm proxy is incompatible with fastapi>=0.115 (get_flat_dependant removed)
-                "$VENV_PATH/bin/pip" install 'fastapi<0.115.0' 'sse-starlette<2.0.0' --quiet
+            if install_litellm_proxy_deps "$VENV_PATH" "install"; then
                 echo
                 echo "Updating .env with venv activation path..."
                 if grep -q "^LITELLM_VENV_ACTIVATE=" "$INSTALL_DIR/.env" 2>/dev/null; then
@@ -379,6 +406,7 @@ echo
 echo "1. Edit configuration files:"
 echo "   • $INSTALL_DIR/.env      (paths, API keys, Docker image)"
 echo "   • $INSTALL_DIR/config.yaml (model definitions)"
+echo "   • Ensure VLLM_DOCKER_IMAGE is compatible with your NVIDIA driver"
 echo
 echo "2. Set up model directory:"
 echo "   • Download your models to a directory"
@@ -394,11 +422,15 @@ echo
 fi
 VLLM_IMAGE=$(grep '^VLLM_DOCKER_IMAGE=' "$INSTALL_DIR/.env" 2>/dev/null | cut -d= -f2)
 VLLM_IMAGE=${VLLM_IMAGE:-nvcr.io/nvidia/vllm:latest}
-echo "4. Pull vLLM Docker image:"
+echo "4. Verify NVIDIA driver and image compatibility:"
+echo "   nvidia-smi | grep 'Driver Version'"
+echo "   grep '^VLLM_DOCKER_IMAGE=' $INSTALL_DIR/.env"
+echo
+echo "5. Pull vLLM Docker image:"
 echo "   docker pull $VLLM_IMAGE"
 echo "   (This may take a few minutes depending on your connection)"
 echo
-echo "5. Test installation:"
+echo "6. Test installation:"
 echo "   harinezumigel-llm-stack --list"
 echo
 echo "For detailed instructions, see README.md"
@@ -408,20 +440,39 @@ echo -e "${GREEN}Installation Complete!${NC}"
 echo "=================================="
 echo
 
+open_config_in_editor() {
+    local target_file="$1"
+
+    if [[ ! -e "$target_file" ]]; then
+        echo -e "${YELLOW}⚠${NC} File not found, creating: $target_file"
+        if ! touch "$target_file"; then
+            echo -e "${RED}✗${NC} Could not create $target_file"
+            return 1
+        fi
+    fi
+
+    if [[ "${EDITOR:-nano}" == "nano" ]]; then
+        nano "$target_file"
+    else
+        ${EDITOR:-nano} "$target_file"
+    fi
+}
+
 # Offer to open editor
 echo "Would you like to edit the configuration files now?"
+echo -e "${YELLOW}⚠ Note: the next file is named .env (dot-env), not venv or .venv.${NC}"
 echo
 read -p "Open .env file for editing? [y/N] " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-    ${EDITOR:-nano} "$INSTALL_DIR/.env"
+    open_config_in_editor "$INSTALL_DIR/.env"
 fi
 
 echo
 read -p "Open config.yaml file for editing? [y/N] " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-    ${EDITOR:-nano} "$INSTALL_DIR/config.yaml"
+    open_config_in_editor "$INSTALL_DIR/config.yaml"
 fi
 
 echo

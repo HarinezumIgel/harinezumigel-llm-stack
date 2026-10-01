@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- `harinezumigel-llm-stack.py`: startup NVIDIA compatibility probe before vLLM model launch (`--start` paths), using a lightweight `docker run --gpus all` check
+- `harinezumigel-llm-stack.py`: mismatch parser for NVIDIA runtime error output to report required and detected driver versions when available
+
+### Changed
+- `install.sh`: LiteLLM setup no longer force-pins `fastapi<0.115.0` and `sse-starlette<2.0.0`; it now relies on `litellm[proxy]` dependency resolution and validates with `pip check`
+- `harinezumigel-llm-stack.py`: startup NVIDIA compatibility probe is warning-only (startup continues) instead of hard-fail
+
+### Fixed
+- `install.sh`: avoided circular MCP conflict guidance where recreating the venv could reproduce the same incompatibility introduced by forced dependency pinning
+- `harinezumigel-llm-stack.py`: reduced startup warning noise in recent vLLM images by removing `VLLM_LOG_LEVEL` injection and unsetting image-level `VLLM_VERSION`, `VLLM_FLASH_ATTN_SRC_DIR`, and `VLLM_LOG_LEVEL` before launching the API server
+
 ## [1.2.0] - 2026-08-05
 
 ### Added
@@ -12,12 +26,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `install.sh`: ask user before copying each example config file individually
 - `install.sh`: back up existing `.env` and `config.yaml` to date-and-time-stamped `.bak` files before overwriting (e.g. `.env_20260805_143022.bak`)
 - `install.sh`: after installing `litellm[proxy]`, pin `fastapi<0.115.0` and `sse-starlette<2.0.0` to fix two incompatibilities with newer package versions
+- `harinezumigel-llm-stack.py`: added `--stream-log` as a shortcut for `--show-log --follow`
+- `harinezumigel-llm-stack.py`: `model_info.ipc` now accepts `host`, `ipc=<mode>`, or `--ipc=<mode>` and passes the normalized Docker IPC flag to `docker run`
 
 ### Changed
 - `install.sh`: `.bak` filenames now include the time (`_HHMMSS`) in addition to the date, preventing collisions when backing up multiple times on the same day
 - `install.sh`: directory-exists prompt now states that config files will be backed up and overwritten (not preserved)
 
 ### Fixed
+- `install.sh`: when pinning LiteLLM proxy dependencies, the script now detects `mcp` in the LiteLLM venv, explains the `sse-starlette` incompatibility (`mcp>=3` vs LiteLLM `<2`), and instructs manual venv removal plus rerunning `install.sh` (no automatic deletion)
+- `harinezumigel-llm-stack.py`: `--stream-log` is now mutually exclusive with `--show-log` and `--follow` to prevent contradictory log flag combinations
 - `harinezumigel-llm-stack.py`: `--recreate` is now rejected when `--stop` is given
 - `harinezumigel-llm-stack.py`: `--recreate` is now rejected unless both `--start` and a model/alias are given (previously only checked for `--start`)
 - `harinezumigel-llm-stack.py`: `--recreate` is now rejected for the `litellm` target regardless of other flags

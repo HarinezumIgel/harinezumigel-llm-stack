@@ -33,6 +33,7 @@ The script manages the entire lifecycle of your LLM infrastructure:
 - **Log formatting**: Expands JSON-escaped stack traces to readable multi-line output
 - **Docker-based**: Uses Docker for isolation, GPU passthrough, and resource management
 - **NGC vLLM image**: Uses NVIDIA NGC container image
+- **Startup NVIDIA compatibility probe**: On model start, runs a lightweight GPU/image probe and prints a warning with required/detected driver versions when a mismatch is detected
 
 ## Prerequisites
 
@@ -88,6 +89,16 @@ pip install 'litellm[proxy]'
 cd scripts/github_deploy
 ./install.sh
 ```
+
+If you choose to copy `.env.example` during install, it becomes `/opt/litellm/.env`,
+which is the authoritative runtime configuration read by this tool.
+Review `VLLM_DOCKER_IMAGE` before first start and select a tag compatible with your
+installed NVIDIA driver version (`nvidia-smi`).
+
+If the installer reports dependency issues in `/opt/litellm/venv`:
+- The script now relies on `litellm[proxy]` dependency resolution and runs `pip check` afterward.
+- `mcp` is used for Model Context Protocol tool/server integrations, not for LiteLLM proxy runtime.
+- If the venv was reused and has stale/conflicting packages, recreate `/opt/litellm/venv` and run `./install.sh` again.
 
 ### Manual Installation
 
@@ -146,7 +157,9 @@ VLLM_BIND_HOST=0.0.0.0
 VLLM_CONTAINER_PORT=8000
 
 # Docker runtime image and mounts
-# Use NVIDIA NGC vLLM image for best GPU support
+# Use NVIDIA NGC vLLM image for best GPU support.
+# IMPORTANT: Match this tag to your host NVIDIA driver version (nvidia-smi).
+# Example guidance: driver 595.x -> 26.05.post1-py3, driver 580.x -> 25.11-py3.
 VLLM_DOCKER_IMAGE=nvcr.io/nvidia/vllm:26.05.post1-py3
 VLLM_MODEL_VOLUME=/opt/models:/models
 VLLM_CACHE_VOLUME=/opt/vllm-cache:/root/.cache/huggingface
@@ -166,6 +179,38 @@ QWEN3_CODER_NEXT_PORT=8002
 # Full API bases (use variable expansion)
 LLAMA_GUARD3_8B_API_BASE=http://${VLLM_HOST}:${LLAMA_GUARD3_8B_PORT}/v1
 QWEN3_CODER_3_NEXT_API_BASE=http://${VLLM_HOST}:${QWEN3_CODER_NEXT_PORT}/v1
+```
+
+### NVIDIA Driver / vLLM Image Compatibility
+
+`VLLM_DOCKER_IMAGE` must be compatible with the NVIDIA driver loaded on the host.
+If these do not match, vLLM containers can fail at startup with driver/library
+compatibility errors.
+
+On model startup, the launcher runs a lightweight compatibility probe (`docker run --gpus all ...`).
+If a mismatch is detected, it prints a warning with parsed driver requirements when available.
+Startup then continues, but the container launch may still fail.
+
+This probe runs on `--start` paths (including `--recreate` and starting a stopped container).
+It does not run on `--stop`.
+
+Check your current host driver:
+
+```bash
+nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n1
+```
+
+Check the configured image tag:
+
+```bash
+grep '^VLLM_DOCKER_IMAGE=' /opt/litellm/.env
+```
+
+When you change `VLLM_DOCKER_IMAGE`, recreate model containers so they pick up
+the new image:
+
+```bash
+harinezumigel-llm-stack <model-or-alias> --start --recreate
 ```
 
 ### 2. LiteLLM Config (`/opt/litellm/config.yaml`)
@@ -191,6 +236,7 @@ model_list:
       max_output_tokens: 64
       max_tokens: 64
       gpu_memory_utilization: 0.20
+      ipc: host
       max_num_seqs: 8
       max_num_batched_tokens: 2048
       dtype: auto
@@ -223,6 +269,7 @@ model_list:
       max_output_tokens: 4096
       max_tokens: 4096
       gpu_memory_utilization: 0.90
+      ipc: host
       max_num_seqs: 1
       max_num_batched_tokens: 8192
       quantization: compressed-tensors
@@ -437,6 +484,7 @@ model_info:
 | `max_input_tokens` | yes | Maximum prompt tokens |
 | `max_output_tokens` | yes | Maximum completion tokens |
 | `gpu_memory_utilization` | yes | Fraction of GPU VRAM to allocate (0.0–1.0) |
+| `ipc` | no | Docker IPC mode; passed as `--ipc=<value>` (e.g. `host`) |
 | `dtype` | no | Model weight dtype (`auto`, `float16`, `bfloat16`) |
 | `alias` | no | Short name for CLI commands (e.g. `coder`) |
 | `description` | no | One-line description shown in `--list` alias table |
@@ -650,6 +698,32 @@ harinezumigel-llm-stack guard --start --recreate --dry-run
 harinezumigel-llm-stack coder --start --recreate
 harinezumigel-llm-stack llama_guard3_8b --start --recreate
 ```
+
+### NVIDIA driver mismatch warning on start
+
+If you see a startup warning like "NVIDIA pre-run compatibility check failed":
+
+1. Check host driver version:
+
+```bash
+nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n1
+```
+
+2. Check configured image tag:
+
+```bash
+grep '^VLLM_DOCKER_IMAGE=' /opt/litellm/.env
+```
+
+3. Select a compatible image tag or upgrade the driver.
+
+4. Recreate the model container so the new image is used:
+
+```bash
+harinezumigel-llm-stack <model-or-alias> --start --recreate
+```
+
+Note: startup continues after the warning, but container launch can still fail if the mismatch remains.
 
 ### API key issues
 

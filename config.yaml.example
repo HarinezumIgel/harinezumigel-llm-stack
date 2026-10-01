@@ -28,6 +28,7 @@ model_list:
       max_output_tokens: 64
       max_tokens: 64
       gpu_memory_utilization: 0.30
+      ipc: host
       dtype: auto
       max_num_seqs: 8
       max_num_batched_tokens: 2048
@@ -61,6 +62,7 @@ model_list:
       max_output_tokens: 4096
       max_tokens: 4096
       gpu_memory_utilization: 0.45
+      ipc: host
       dtype: auto
       max_num_seqs: 8
       max_num_batched_tokens: 16384
@@ -95,6 +97,7 @@ model_list:
       max_output_tokens: 4096
       max_tokens: 4096
       gpu_memory_utilization: 0.45
+      ipc: host
       dtype: auto
       max_num_seqs: 8
       max_num_batched_tokens: 16384
@@ -130,6 +133,7 @@ model_list:
       max_output_tokens: 4096
       max_tokens: 4096
       gpu_memory_utilization: 0.90
+      ipc: host
       dtype: auto
       max_num_seqs: 1
       max_num_batched_tokens: 16384
@@ -169,6 +173,7 @@ model_list:
       max_output_tokens: 4096
       max_tokens: 4096
       gpu_memory_utilization: 0.90
+      ipc: host
       dtype: auto
       max_num_seqs: 1
       max_num_batched_tokens: 8192
@@ -211,6 +216,7 @@ model_list:
       max_output_tokens: 4096
       max_tokens: 4096
       gpu_memory_utilization: 0.94
+      ipc: host
       dtype: auto
       max_num_seqs: 8
       max_num_batched_tokens: 32768
@@ -253,6 +259,7 @@ model_list:
       max_output_tokens: 4096
       max_tokens: 4096
       gpu_memory_utilization: 0.50
+      ipc: host
       dtype: auto
       max_num_seqs: 8
       max_num_batched_tokens: 16384
@@ -291,6 +298,7 @@ model_list:
       max_output_tokens: 4096
       max_tokens: 4096
       gpu_memory_utilization: 0.5
+      ipc: host
       dtype: auto
       max_num_seqs: 1
       max_num_batched_tokens: 8192
@@ -340,6 +348,7 @@ model_list:
       max_output_tokens: 4096
       max_tokens: 4096
       gpu_memory_utilization: 0.82
+      ipc: host
       dtype: bfloat16
       max_num_batched_tokens: 32768
       max_num_seqs: 8

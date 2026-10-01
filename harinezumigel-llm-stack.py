@@ -48,8 +48,8 @@ It manages:
     # Start using an alias (if configured in model_info.alias)
     harinezumigel-llm-stack coder --start
 
-    # Start a model AND follow logs (stays attached)
-    harinezumigel-llm-stack mistral_7b --start --log --follow
+    # Start a model and stream logs (stays attached)
+    harinezumigel-llm-stack mistral_7b --start --stream-log
 
     # Start with explicit port (works with both name and alias)
     harinezumigel-llm-stack qwen-coder --start --port 8003
@@ -115,7 +115,7 @@ from urllib.parse import ParseResult, urlparse
 
 import yaml
 
-__version__ = "1.2.0/50 08/05/2026"
+__version__ = "1.3.0/19 10/01/2026"
 
 _RED = "\033[31m"
 _RESET = "\033[0m"
@@ -359,6 +359,33 @@ def as_bool(value: Any, default: bool = False) -> bool:
     return bool(value)
 
 
+def docker_ipc_arg(value: Any) -> str | None:
+    """Normalize model_info.ipc to a Docker --ipc flag.
+
+    Accepted forms:
+    - host
+    - --ipc=host
+    - ipc=host
+    """
+    if value is None:
+        return None
+
+    ipc_value = str(value).strip()
+
+    if not ipc_value:
+        return None
+
+    if ipc_value.startswith("--ipc="):
+        return ipc_value
+
+    if ipc_value.startswith("ipc="):
+        ipc_value = ipc_value.split("=", 1)[1].strip()
+        if not ipc_value:
+            return None
+
+    return f"--ipc={ipc_value}"
+
+
 def format_sampling_parameters(
     override_gen_config: dict[str, Any], litellm_params: dict[str, Any]
 ) -> list[str]:
@@ -387,6 +414,28 @@ def format_sampling_parameters(
             source = "model-spec" if override_val is not None else "litellm"
             sampling_parts.append(f"{param_name}={final_val}({source})")
     return sampling_parts
+
+
+def extract_nvidia_driver_mismatch(message: str) -> tuple[str, str] | None:
+    """Extract required/detected driver versions from NVIDIA runtime errors.
+
+    Typical message pattern:
+    "This container was built for NVIDIA Driver Release 595.58 or later,
+    but version 580.178.04 was detected"
+    """
+    match = re.search(
+        r"NVIDIA Driver Release\s+([0-9]+(?:\.[0-9]+){1,2})\s+or later,\s+"
+        r"but version\s+([0-9]+(?:\.[0-9]+){1,2})\s+was detected",
+        message,
+        flags=re.IGNORECASE,
+    )
+
+    if match is None:
+        return None
+
+    required = match.group(1)
+    detected = match.group(2)
+    return required, detected
 
 
 def port_in_use(port: int, host: str) -> bool:
@@ -873,6 +922,83 @@ class LLMStack:
 
         return result.stdout.strip() or None
 
+    def _host_nvidia_driver_version(self) -> str | None:
+        """Read host NVIDIA driver version from nvidia-smi (if available)."""
+        result = run_command(
+            ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+            capture=True,
+        )
+
+        if result.returncode != 0:
+            return None
+
+        for line in result.stdout.splitlines():
+            candidate = line.strip()
+            if candidate:
+                return candidate
+
+        return None
+
+    def _preflight_check_nvidia_driver(self, *, dry_run: bool = False) -> None:
+        """Run a startup GPU/image compatibility probe and warn on failure.
+
+        Runs a lightweight GPU-enabled container probe before launching vLLM.
+        This catches common NVIDIA driver/image mismatches early with a
+        readable warning message.
+        """
+        command = [
+            "docker",
+            "run",
+            "--rm",
+            "--gpus",
+            "all",
+            "--entrypoint",
+            "python3",
+            self.config.vllm_docker_image,
+            "-c",
+            "import sys; sys.exit(0)",
+        ]
+
+        if dry_run:
+            print("Preflight check (dry-run): skipping NVIDIA compatibility probe.")
+            print("Would run:", " ".join(command))
+            return
+
+        result = run_command(command, capture=True)
+
+        if result.returncode == 0:
+            print("NVIDIA pre-run compatibility check passed.")
+            return
+
+        output_parts = [result.stdout.strip(), result.stderr.strip()]
+        output = "\n".join(part for part in output_parts if part)
+
+        print("WARNING: NVIDIA pre-run compatibility check failed.")
+        print(f"Docker image: {self.config.vllm_docker_image}")
+
+        mismatch = extract_nvidia_driver_mismatch(output)
+
+        if mismatch:
+            required, detected = mismatch
+            print(f"Required NVIDIA driver: >= {required}")
+            print(f"Detected NVIDIA driver: {detected}")
+        else:
+            host_driver = self._host_nvidia_driver_version()
+            if host_driver:
+                print(f"Detected NVIDIA driver: {host_driver}")
+
+        if output:
+            print()
+            print("Docker/NVIDIA output:")
+            print(output)
+
+        print()
+        print(
+            "Fix by selecting a compatible VLLM_DOCKER_IMAGE tag "
+            "or upgrading the host NVIDIA driver."
+        )
+        print("Startup will continue, but container launch may fail.")
+
     def _find_all_vllm_containers(self, model_name: str) -> list[str]:
         """Find all vLLM container names for a model (running and stopped)."""
         prefix = f"vllm-{docker_safe_name(model_name)}-"
@@ -959,6 +1085,7 @@ class LLMStack:
 
         interesting_keys = [
             "model_dir",
+            "ipc",
             "quantization",
             "kv_cache_dtype",
             "generation_config",
@@ -1026,7 +1153,7 @@ class LLMStack:
     def generate_help(self) -> str:
         """Generate dynamic help text."""
         keys = [
-            "model_dir", "quantization", "kv_cache_dtype", "generation_config",
+            "model_dir", "ipc", "quantization", "kv_cache_dtype", "generation_config",
             "override_generation_config", "max_num_batched_tokens", "max_num_seqs",
             "attention_backend", "enable_prefix_caching", "enforce_eager",
             "enable_auto_tool_choice", "tool_call_parser", "license", "upstream",
@@ -1088,17 +1215,18 @@ Examples:
   Start models (model name or alias):
   -----------------------------------
 
-  harinezumigel-llm-stack mistral_7b --start                # start using model name
+    harinezumigel-llm-stack mistral_7b --start                # start using model name
     harinezumigel-llm-stack coder --start                     # start using alias (if configured)
-    harinezumigel-llm-stack mistral_7b --start --show-log    # start and follow logs (stays attached)
+    harinezumigel-llm-stack mistral_7b --start --stream-log  # start and follow logs (stays attached)
     harinezumigel-llm-stack mistral_7b --start --dry-run      # preview what would be done
     harinezumigel-llm-stack mistral_7b --start --recreate     # force recreate container
 
   View logs:
   ----------
 
-  harinezumigel-llm-stack mistral_7b --show-log             # show last 200 lines
-  harinezumigel-llm-stack mistral_7b --show-log --follow    # follow logs (container must be running)
+    harinezumigel-llm-stack mistral_7b --show-log             # show last 200 lines
+    harinezumigel-llm-stack mistral_7b --stream-log           # show and follow logs
+    harinezumigel-llm-stack mistral_7b --show-log --follow    # equivalent to --stream-log
 
   Show log paths:
   ---------------
@@ -1308,6 +1436,10 @@ Current model values from LiteLLM config:
                     print(f"  Status:   ✗ Skipped — unexpected log path: {log_path}")
                     continue
 
+                if not Path(log_path).exists():
+                    print(f"  Status:   ✗ Skipped — log file not found: {log_path}")
+                    continue
+
                 result = run_command(["sudo", "truncate", "-s", "0", log_path], capture=True)
 
                 if result.returncode == 0:
@@ -1335,29 +1467,48 @@ Current model values from LiteLLM config:
     ) -> list[str]:
         """Build the Docker command for a vLLM backend."""
         raw_info = model.model_info
+        ipc_arg = docker_ipc_arg(raw_info.get("ipc"))
 
         command = [
             "docker", "run", "-d",
             "--name", f"vllm-{docker_safe_name(model.name)}-{port}",
             "--runtime=nvidia",
             "--gpus=all",
-            "--ipc=host",
-            "-p", f"{self.config.vllm_bind_host}:{port}:{self.config.vllm_container_port}",
-            "-v", self.config.vllm_model_volume,
-            "-v", self.config.vllm_cache_volume,
-            "-v", "/etc/timezone:/etc/timezone:ro",
-            "-v", "/etc/localtime:/etc/localtime:ro",
-            "-e", "VLLM_CONFIGURE_LOGGING=1",
-            "-e", "VLLM_LOG_LEVEL=INFO",
-            self.config.vllm_docker_image,
-            "python3", "-u", "-m", "vllm.entrypoints.openai.api_server",
-            "--model", f"/models/{model_dir.name}",
-            "--served-model-name", model.name,
-            "--dtype", str(runtime.get("dtype", "auto")),
-            "--max-model-len", str(runtime["context_length"]),
-            "--gpu-memory-utilization", str(runtime["gpu_memory_utilization"]),
-            "--host", "0.0.0.0",
         ]
+
+        if ipc_arg:
+            command.append(ipc_arg)
+
+        command.extend(
+            [
+                "-p", f"{self.config.vllm_bind_host}:{port}:{self.config.vllm_container_port}",
+                "-v", self.config.vllm_model_volume,
+                "-v", self.config.vllm_cache_volume,
+                "-v", "/etc/timezone:/etc/timezone:ro",
+                "-v", "/etc/localtime:/etc/localtime:ro",
+                "-e", "VLLM_CONFIGURE_LOGGING=1",
+                self.config.vllm_docker_image,
+                # Some NVIDIA images export internal VLLM_* vars that newer vLLM
+                # versions don't recognize. Remove them for a clean startup.
+                "env",
+                "-u",
+                "VLLM_VERSION",
+                "-u",
+                "VLLM_FLASH_ATTN_SRC_DIR",
+                "-u",
+                "VLLM_LOG_LEVEL",
+                "python3",
+                "-u",
+                "-m",
+                "vllm.entrypoints.openai.api_server",
+                "--model", f"/models/{model_dir.name}",
+                "--served-model-name", model.name,
+                "--dtype", str(runtime.get("dtype", "auto")),
+                "--max-model-len", str(runtime["context_length"]),
+                "--gpu-memory-utilization", str(runtime["gpu_memory_utilization"]),
+                "--host", "0.0.0.0",
+            ]
+        )
 
         max_num_batched_tokens = raw_info.get("max_num_batched_tokens")
 
@@ -1418,10 +1569,13 @@ Current model values from LiteLLM config:
     ) -> None:
         """Print a readable vLLM startup summary."""
         raw_info = model.model_info
+        ipc_arg = docker_ipc_arg(raw_info.get("ipc"))
+        ipc_mode = ipc_arg.split("=", 1)[1] if ipc_arg else "(default)"
 
         print(f"=== Starting vLLM model: {model.name} ===")
         print(f"Docker image:             {self.config.vllm_docker_image}")
         print(f"Container:                vllm-{docker_safe_name(model.name)}-{port}")
+        print(f"Docker IPC mode:          {ipc_mode}")
         print(f"Model directory:           {model_dir}")
         print(f"Directory basename:        {model_dir.name}")
         print(f"Served model name:         {model.name}")
@@ -1526,6 +1680,7 @@ Current model values from LiteLLM config:
                     print(f"ERROR: Port {options.port} is already in use on {self.config.vllm_bind_host}")
                     sys.exit(1)
 
+                self._preflight_check_nvidia_driver(dry_run=options.dry_run)
                 self._docker_start_container(container_name, dry_run=options.dry_run)
                 self._print_container_reuse_notice(container_name, model.name, options.port)
                 return
@@ -1542,6 +1697,7 @@ Current model values from LiteLLM config:
             print(f"ERROR: Port {options.port} is already in use on {self.config.vllm_bind_host}")
             sys.exit(1)
 
+        self._preflight_check_nvidia_driver(dry_run=options.dry_run)
         command = self._build_vllm_command(model, model_dir, options.port, options.runtime)
         self._print_vllm_start_summary(model, model_dir, options.port, options.runtime, command)
 
@@ -1956,7 +2112,7 @@ Current model values from LiteLLM config:
 
             if args.stop:
                 if args.show_log or args.follow:
-                    print("ERROR: --show-log and --follow are not allowed with --stop")
+                    print("ERROR: --show-log, --follow, and --stream-log are not allowed with --stop")
                     sys.exit(1)
                 self.stop_litellm(dry_run=args.dry_run)
                 return
@@ -1975,7 +2131,7 @@ Current model values from LiteLLM config:
             return
 
         if args.stop and (args.show_log or args.follow):
-            print("ERROR: --show-log and --follow are not allowed with --stop")
+            print("ERROR: --show-log, --follow, and --stream-log are not allowed with --stop")
             sys.exit(1)
 
         if self.handle_logs(args):
@@ -2005,9 +2161,9 @@ Current model values from LiteLLM config:
             print()
             print("Available actions:")
             print("  --start              Start the container")
-            print("  --start --show-log   Start and show logs")
+            print("  --start --stream-log Start and show logs")
             print("  --show-log           View logs")
-            print("  --show-log --follow  Follow logs")
+            print("  --stream-log         Follow logs")
             print("  --stop               Stop the container")
             sys.exit(1)
 
@@ -2099,16 +2255,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-reuse-existing", action="store_true")
 
     parser.add_argument("--show-log", action="store_true", help="Show container logs (or paths for 'all')")
+    parser.add_argument("--stream-log", action="store_true", help="Show and follow logs (equivalent to --show-log --follow)")
     parser.add_argument("--show-log-path", action="store_true", help="Show Docker log file paths")
     parser.add_argument("--clean-log", action="store_true", help="Clean/truncate container log files")
-    parser.add_argument("--follow", "-f", action="store_true", help="Follow log output (use with --show-log)")
+    parser.add_argument("--follow", "-f", action="store_true", help="Follow log output (use with --show-log or use --stream-log)")
     parser.add_argument("--tail", default="200")
 
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--help", action="store_true")
 
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    if args.stream_log and args.show_log:
+        parser.error("--stream-log is mutually exclusive with --show-log")
+
+    if args.stream_log and args.follow:
+        parser.error("--stream-log is mutually exclusive with --follow")
+
+    if args.stream_log:
+        args.show_log = True
+        args.follow = True
+
+    return args
 
 
 def main() -> None:

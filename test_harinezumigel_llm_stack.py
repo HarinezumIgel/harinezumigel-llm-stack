@@ -234,6 +234,16 @@ class TestUtilityFunctions(unittest.TestCase):
         self.assertFalse(as_bool(""))
         self.assertFalse(as_bool(None))
 
+    def test_docker_ipc_arg(self):
+        """Test docker_ipc_arg normalization."""
+        from harinezumigel_llm_stack import docker_ipc_arg # type: ignore
+
+        self.assertIsNone(docker_ipc_arg(None))
+        self.assertIsNone(docker_ipc_arg(""))
+        self.assertEqual(docker_ipc_arg("host"), "--ipc=host")
+        self.assertEqual(docker_ipc_arg(" --ipc=host "), "--ipc=host")
+        self.assertEqual(docker_ipc_arg("ipc=private"), "--ipc=private")
+
     def test_port_in_use(self):
         """Test port_in_use check."""
         from harinezumigel_llm_stack import port_in_use # type: ignore
@@ -279,6 +289,26 @@ class TestUtilityFunctions(unittest.TestCase):
         self.assertEqual(redacted[4], "***REDACTED***")
         self.assertEqual(redacted[5], "--other-flag")
         self.assertEqual(redacted[6], "value")
+
+    def test_extract_nvidia_driver_mismatch(self):
+        """Extract required and detected versions from NVIDIA mismatch errors."""
+        from harinezumigel_llm_stack import extract_nvidia_driver_mismatch # type: ignore
+
+        message = (
+            "This container was built for NVIDIA Driver Release 595.58 or later, "
+            "but version 580.178.04 was detected and compatibility mode is unavailable"
+        )
+
+        self.assertEqual(
+            extract_nvidia_driver_mismatch(message),
+            ("595.58", "580.178.04"),
+        )
+
+    def test_extract_nvidia_driver_mismatch_no_match(self):
+        """Non-mismatch messages should return None."""
+        from harinezumigel_llm_stack import extract_nvidia_driver_mismatch # type: ignore
+
+        self.assertIsNone(extract_nvidia_driver_mismatch("unrelated docker error"))
 
 
 class TestFormatLogLine(unittest.TestCase):
@@ -587,6 +617,196 @@ class TestLLMStackDockerOperations(unittest.TestCase):
         self.assertTrue(stack._docker_port_in_use(8001))
         self.assertTrue(stack._docker_port_in_use(8002))
         self.assertFalse(stack._docker_port_in_use(8003))
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    def test_build_vllm_command_includes_ipc_when_configured(self, mock_load: Any) -> None:
+        """model_info.ipc should add a Docker --ipc flag."""
+        from harinezumigel_llm_stack import AppConfig, LLMStack, ModelDeployment # type: ignore
+
+        config = AppConfig.from_env()
+        stack = LLMStack(config)
+
+        model = ModelDeployment(
+            name="test_model",
+            backend_model="openai/test_model",
+            api_base="http://localhost:8001/v1",
+            api_key="sk-test",
+            api_base_host="localhost",
+            api_base_port=8001,
+            litellm_params={},
+            model_info={"ipc": "host"},
+            context_length=4096,
+            max_input_tokens=3000,
+            max_output_tokens=1000,
+            gpu_memory_utilization=0.9,
+            max_num_seqs=None,
+            dtype="auto",
+            license=None,
+            upstream=None,
+            alias=None,
+            description=None,
+            detail=None,
+            allow_rebuild=True,
+        )
+
+        runtime: dict[str, int | float | str | None] = {
+            "context_length": 4096,
+            "max_input_tokens": 3000,
+            "max_output_tokens": 1000,
+            "gpu_memory_utilization": 0.9,
+            "max_num_seqs": None,
+            "dtype": "auto",
+        }
+        command = stack._build_vllm_command(
+            model,
+            Path("/models/test-model"),
+            8001,
+            runtime,
+        )
+
+        self.assertIn("--ipc=host", command)
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    def test_build_vllm_command_omits_ipc_when_not_configured(self, mock_load: Any) -> None:
+        """No model_info.ipc should omit Docker --ipc flag."""
+        from harinezumigel_llm_stack import AppConfig, LLMStack, ModelDeployment # type: ignore
+
+        config = AppConfig.from_env()
+        stack = LLMStack(config)
+
+        model = ModelDeployment(
+            name="test_model",
+            backend_model="openai/test_model",
+            api_base="http://localhost:8001/v1",
+            api_key="sk-test",
+            api_base_host="localhost",
+            api_base_port=8001,
+            litellm_params={},
+            model_info={},
+            context_length=4096,
+            max_input_tokens=3000,
+            max_output_tokens=1000,
+            gpu_memory_utilization=0.9,
+            max_num_seqs=None,
+            dtype="auto",
+            license=None,
+            upstream=None,
+            alias=None,
+            description=None,
+            detail=None,
+            allow_rebuild=True,
+        )
+
+        runtime: dict[str, int | float | str | None] = {
+            "context_length": 4096,
+            "max_input_tokens": 3000,
+            "max_output_tokens": 1000,
+            "gpu_memory_utilization": 0.9,
+            "max_num_seqs": None,
+            "dtype": "auto",
+        }
+        command = stack._build_vllm_command(
+            model,
+            Path("/models/test-model"),
+            8001,
+            runtime,
+        )
+
+        self.assertFalse(any(part.startswith("--ipc=") for part in command))
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    @patch("harinezumigel_llm_stack.run_command")
+    def test_preflight_nvidia_driver_check_success(self, mock_run: Any, mock_load: Any) -> None:
+        """Preflight should pass when docker GPU probe succeeds."""
+        from harinezumigel_llm_stack import AppConfig, LLMStack # type: ignore
+
+        config = AppConfig.from_env()
+        stack = LLMStack(config)
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        stack._preflight_check_nvidia_driver(dry_run=False)
+
+        mock_run.assert_called_once_with(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--gpus",
+                "all",
+                "--entrypoint",
+                "python3",
+                config.vllm_docker_image,
+                "-c",
+                "import sys; sys.exit(0)",
+            ],
+            capture=True,
+        )
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    @patch("harinezumigel_llm_stack.run_command")
+    def test_preflight_nvidia_driver_check_mismatch_warns(
+        self,
+        mock_run: Any,
+        mock_load: Any,
+    ) -> None:
+        """Preflight should warn but not abort on driver/image mismatch."""
+        from harinezumigel_llm_stack import AppConfig, LLMStack # type: ignore
+
+        config = AppConfig.from_env()
+        stack = LLMStack(config)
+
+        mock_run.return_value = MagicMock(
+            returncode=1,
+            stdout="",
+            stderr=(
+                "This container was built for NVIDIA Driver Release 595.58 or later, "
+                "but version 580.178.04 was detected"
+            ),
+        )
+
+        stack._preflight_check_nvidia_driver(dry_run=False)
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    @patch("harinezumigel_llm_stack.run_command")
+    def test_preflight_nvidia_driver_check_dry_run(self, mock_run: Any, mock_load: Any) -> None:
+        """Dry-run mode should not execute the docker GPU probe."""
+        from harinezumigel_llm_stack import AppConfig, LLMStack # type: ignore
+
+        config = AppConfig.from_env()
+        stack = LLMStack(config)
+
+        stack._preflight_check_nvidia_driver(dry_run=True)
+
+        mock_run.assert_not_called()
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    @patch("harinezumigel_llm_stack.run_command")
+    @patch("harinezumigel_llm_stack.Path.exists")
+    def test_clean_vllm_logs_skips_missing_log_file(
+        self,
+        mock_exists: Any,
+        mock_run: Any,
+        mock_load: Any,
+    ) -> None:
+        """Missing Docker log files should be skipped before truncate."""
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
+
+        config = AppConfig.from_env()
+        stack = LLMStack(config)
+
+        mock_exists.return_value = False
+
+        with patch.object(stack, "_resolve_model_name", return_value="test_model"):
+            with patch.object(stack, "_find_all_vllm_containers", return_value=["vllm-test_model-8001"]):
+                with patch.object(
+                    stack,
+                    "_docker_container_log_path",
+                    return_value="/var/lib/docker/containers/test/test-json.log",
+                ):
+                    stack.clean_vllm_logs("test_model", dry_run=False)
+
+        mock_run.assert_not_called()
 
 
 class TestLLMStackModelResolution(unittest.TestCase):
@@ -1057,6 +1277,60 @@ class TestSafetyGuards(unittest.TestCase):
                 stack.run(args)
         finally:
             os.unlink(temp_config)
+
+
+class TestCLIParseArgs(unittest.TestCase):
+    """Test CLI argument parsing behavior."""
+
+    def test_stream_log_sets_show_log_and_follow(self) -> None:
+        """--stream-log should normalize to --show-log + --follow."""
+        from harinezumigel_llm_stack import parse_args  # type: ignore
+
+        with patch.object(sys, "argv", ["harinezumigel-llm-stack", "mistral_7b", "--stream-log"]):
+            args = parse_args()
+
+        self.assertTrue(args.stream_log)
+        self.assertTrue(args.show_log)
+        self.assertTrue(args.follow)
+
+    def test_stream_log_conflicts_with_show_log(self) -> None:
+        """--stream-log and --show-log cannot be used together."""
+        from harinezumigel_llm_stack import parse_args  # type: ignore
+
+        with patch.object(
+            sys,
+            "argv",
+            ["harinezumigel-llm-stack", "mistral_7b", "--stream-log", "--show-log"],
+        ):
+            with self.assertRaises(SystemExit):
+                parse_args()
+
+    def test_stream_log_conflicts_with_follow(self) -> None:
+        """--stream-log and --follow cannot be used together."""
+        from harinezumigel_llm_stack import parse_args  # type: ignore
+
+        with patch.object(
+            sys,
+            "argv",
+            ["harinezumigel-llm-stack", "mistral_7b", "--stream-log", "--follow"],
+        ):
+            with self.assertRaises(SystemExit):
+                parse_args()
+
+    def test_show_log_with_follow_still_valid(self) -> None:
+        """Existing --show-log --follow behavior should remain valid."""
+        from harinezumigel_llm_stack import parse_args  # type: ignore
+
+        with patch.object(
+            sys,
+            "argv",
+            ["harinezumigel-llm-stack", "mistral_7b", "--show-log", "--follow"],
+        ):
+            args = parse_args()
+
+        self.assertFalse(args.stream_log)
+        self.assertTrue(args.show_log)
+        self.assertTrue(args.follow)
 
 
 class TestRunCommand(unittest.TestCase):
