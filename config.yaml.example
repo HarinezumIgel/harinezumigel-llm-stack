@@ -8,6 +8,10 @@ config_metadata:
     current license and terms applicable to each model.
 
 model_list:
+  # IMPORTANT:
+  # - `rebuild` is a top-level key under each model entry.
+  # - `--recreate` is allowed only when `rebuild: true` is explicitly set.
+  # - If `rebuild` is missing or not true, recreate is blocked for that model.
   # ---------------------------------------------------------------------------
   # Safety / moderation
   # ---------------------------------------------------------------------------

@@ -600,6 +600,7 @@ class ModelDeployment:  # pylint: disable=too-many-instance-attributes
     description: str | None
     detail: str | None
     allow_rebuild: bool
+    rebuild_key_present: bool = False
 
 
 @dataclass(frozen=True)
@@ -692,7 +693,9 @@ class LLMStack:
             alias = model_info.get("alias") or None
             description = model_info.get("description")
             detail = model_info.get("detail")
-            allow_rebuild = as_bool(model_info.get("rebuild", True))
+            rebuild_key_present = "rebuild" in entry
+            rebuild_flag = entry.get("rebuild")
+            allow_rebuild = as_bool(rebuild_flag, False)
 
             if api_base:
                 api_base_host, api_base_port = self._parse_api_base(api_base)
@@ -722,6 +725,7 @@ class LLMStack:
                 description=description,
                 detail=detail,
                 allow_rebuild=allow_rebuild,
+                rebuild_key_present=rebuild_key_present,
             )
 
         # Validate alias uniqueness
@@ -1630,7 +1634,16 @@ Current model values from LiteLLM config:
         - Respects dry_run flag throughout
         """
         if options.recreate and not model.allow_rebuild:
-            print(f"ERROR: --recreate is blocked for model '{model.name}' (rebuild: false in config.yaml)")
+            if not model.rebuild_key_present:
+                print(
+                    f"ERROR: --recreate is blocked for model '{model.name}': "
+                    "rebuild: true must be specified at the model entry level in config.yaml"
+                )
+            else:
+                print(
+                    f"ERROR: --recreate is blocked for model '{model.name}' "
+                    "(set top-level rebuild: true in config.yaml to allow recreate)"
+                )
             sys.exit(1)
 
         try:

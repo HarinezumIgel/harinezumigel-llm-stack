@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - `install.sh`: LiteLLM setup no longer force-pins `fastapi<0.115.0` and `sse-starlette<2.0.0`; it now relies on `litellm[proxy]` dependency resolution and validates with `pip check`
 - `harinezumigel-llm-stack.py`: startup NVIDIA compatibility probe is warning-only (startup continues) instead of hard-fail
+- `harinezumigel-llm-stack.py`: `--recreate` authorization now reads only top-level `rebuild` per `model_list` entry (no `model_info.rebuild` fallback)
+- `harinezumigel-llm-stack.py`: when top-level `rebuild` is missing, recreate is blocked by default and prints an explicit message requiring `rebuild: true`
+- `README.md` and `config.yaml.example`: documented strict top-level `rebuild: true` requirement for `--recreate`
 
 ### Fixed
 - `install.sh`: avoided circular MCP conflict guidance where recreating the venv could reproduce the same incompatibility introduced by forced dependency pinning

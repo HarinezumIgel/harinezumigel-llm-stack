@@ -229,6 +229,7 @@ model_list:
       request_timeout: 60
       temperature: 0.0
       top_p: 1.0
+    rebuild: true
     model_info:
       model_dir: llama-guard3-8b
       context_length: 2048
@@ -261,6 +262,7 @@ model_list:
       temperature: 0.2
       top_p: 0.9
       top_k: 20
+    rebuild: true
     model_info:
       model_dir: Qwen3-Coder-Next-AWQ
 
@@ -343,6 +345,9 @@ harinezumigel-llm-stack llama_guard3_8b --start --auto-port
 harinezumigel-llm-stack Qwen3-Coder-Next-AWQ --start --recreate
 harinezumigel-llm-stack coder --start --recreate  # same, using alias
 ```
+
+`--recreate` is only allowed when that model entry in `config.yaml` explicitly sets top-level `rebuild: true`.
+If `rebuild` is missing or not `true`, the command exits with an error.
 
 ### Override Runtime Parameters
 
@@ -475,6 +480,12 @@ model_info:
   model_dir: deepseek-v4-pro-70b      # deepseek-v4-pro-70b
 ```
 
+### Model Entry Reference
+
+| Field | Required | Description |
+|---|---|---|
+| `rebuild` | yes (for recreate) | Top-level field under each `model_list` entry. Must be explicitly set to `true` to allow `--recreate`. If missing or not `true`, `--recreate` is blocked. |
+
 ### Model `model_info` Reference
 
 | Field | Required | Description |
@@ -489,7 +500,6 @@ model_info:
 | `alias` | no | Short name for CLI commands (e.g. `coder`) |
 | `description` | no | One-line description shown in `--list` alias table |
 | `detail` | no | Longer detail line shown in full model listing |
-| `rebuild` | no | Set to `false` to block `--recreate` for this model (default: `true`) |
 | `override_generation_config` | no | Sampling parameters applied at the vLLM server level (e.g. `temperature`, `top_p`, `top_k`, `repetition_penalty`). Displayed in `--list` and at LiteLLM startup. |
 | `quantization` | no | Quantization scheme (e.g. `compressed-tensors`, `awq`) |
 | `kv_cache_dtype` | no | KV cache precision (e.g. `fp8`) |
@@ -581,7 +591,7 @@ Starting vLLM container for model: Qwen3-Coder-Next-AWQ
 - **Scoped operations**: Only manages containers with `vllm-` prefix
 - **Recreate scoping**: `--recreate` only affects the single named model/alias; requires `--start`
 - **Alias safety**: Duplicate aliases are rejected at startup; unknown aliases exit with a clear error
-- **Rebuild protection**: Setting `rebuild: false` in `model_info` blocks `--recreate` for that model
+- **Rebuild protection**: `--recreate` is allowed only when top-level `rebuild: true` is explicitly set for the model; missing or non-true values block recreate
 - **Process safety**: Kills only LiteLLM processes matching specific patterns
 - **Port validation**: Checks port availability before binding
 - **Self-protection**: Won't kill its own process when stopping LiteLLM
@@ -616,6 +626,8 @@ harinezumigel-llm-stack mistral-7b --start --recreate
 1. Stops existing container (if running)
 2. Removes container
 3. Creates fresh container with current settings
+
+This flow is only allowed when the target model entry has top-level `rebuild: true` in `config.yaml`.
 
 > `--recreate` **only** affects the single model or alias explicitly named on the command line. It requires `--start` and will exit with an error if used without it. All other containers are left untouched.
 

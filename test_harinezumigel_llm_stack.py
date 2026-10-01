@@ -1230,13 +1230,13 @@ class TestSafetyGuards(unittest.TestCase):
             "model_list": [
                 {
                     "model_name": "protected_model",
+                    "rebuild": False,
                     "litellm_params": {
                         "model": "openai/protected_model",
                         "api_base": "http://localhost:8001/v1",
                         "api_key": "sk-test",
                     },
                     "model_info": {
-                        "rebuild": False,
                         "context_length": 4096,
                         "max_input_tokens": 3000,
                         "max_output_tokens": 512,
@@ -1282,6 +1282,149 @@ class TestSafetyGuards(unittest.TestCase):
 
             with self.assertRaises(SystemExit):
                 stack.run(args)
+        finally:
+            safe_unlink(temp_config)
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    def test_top_level_rebuild_false_blocks_recreate_alias(self, mock_load: Any) -> None:
+        """Top-level rebuild: false must block --recreate when starting by alias."""
+        import argparse
+        import tempfile
+        import yaml  # type: ignore
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
+
+        config_data = {
+            "model_list": [
+                {
+                    "model_name": "mistral_7b",
+                    "rebuild": False,
+                    "litellm_params": {
+                        "model": "openai/mistral_7b",
+                        "api_base": "http://localhost:8001/v1",
+                        "api_key": "sk-test",
+                    },
+                    "model_info": {
+                        "alias": "mistral",
+                        "context_length": 4096,
+                        "max_input_tokens": 3000,
+                        "max_output_tokens": 512,
+                        "gpu_memory_utilization": 0.9,
+                    },
+                }
+            ]
+        }
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            yaml.dump(config_data, f)
+            temp_config = f.name
+
+        try:
+            os.environ["LITELLM_CONFIG"] = temp_config
+            config = AppConfig.from_env()
+            stack = LLMStack(config)
+
+            args = argparse.Namespace(
+                model="mistral",
+                start=True,
+                stop=False,
+                recreate=True,
+                no_reuse_existing=False,
+                dry_run=False,
+                show_log=False,
+                show_log_path=False,
+                clean_log=False,
+                follow=False,
+                tail="200",
+                ps=False,
+                list=False,
+                help=False,
+                port=8001,
+                auto_port=False,
+                context_length=None,
+                max_input_tokens=None,
+                max_output_tokens=None,
+                gpu_memory_utilization=None,
+                max_num_seqs=None,
+                dtype=None,
+            )
+
+            with self.assertRaises(SystemExit):
+                stack.run(args)
+        finally:
+            safe_unlink(temp_config)
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    def test_missing_top_level_rebuild_blocks_recreate_with_message(self, mock_load: Any) -> None:
+        """Missing top-level rebuild must block --recreate even if model_info.rebuild is true."""
+        import argparse
+        import io
+        import tempfile
+        from contextlib import redirect_stdout
+
+        import yaml  # type: ignore
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
+
+        config_data = {
+            "model_list": [
+                {
+                    "model_name": "protected_model",
+                    "litellm_params": {
+                        "model": "openai/protected_model",
+                        "api_base": "http://localhost:8001/v1",
+                        "api_key": "sk-test",
+                    },
+                    "model_info": {
+                        "rebuild": True,
+                        "context_length": 4096,
+                        "max_input_tokens": 3000,
+                        "max_output_tokens": 512,
+                        "gpu_memory_utilization": 0.9,
+                    },
+                }
+            ]
+        }
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            yaml.dump(config_data, f)
+            temp_config = f.name
+
+        try:
+            os.environ["LITELLM_CONFIG"] = temp_config
+            config = AppConfig.from_env()
+            stack = LLMStack(config)
+
+            args = argparse.Namespace(
+                model="protected_model",
+                start=True,
+                stop=False,
+                recreate=True,
+                no_reuse_existing=False,
+                dry_run=False,
+                show_log=False,
+                show_log_path=False,
+                clean_log=False,
+                follow=False,
+                tail="200",
+                ps=False,
+                list=False,
+                help=False,
+                port=8001,
+                auto_port=False,
+                context_length=None,
+                max_input_tokens=None,
+                max_output_tokens=None,
+                gpu_memory_utilization=None,
+                max_num_seqs=None,
+                dtype=None,
+            )
+
+            output = io.StringIO()
+
+            with self.assertRaises(SystemExit):
+                with redirect_stdout(output):
+                    stack.run(args)
+
+            self.assertIn("rebuild: true must be specified", output.getvalue())
         finally:
             safe_unlink(temp_config)
 
