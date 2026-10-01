@@ -1801,9 +1801,35 @@ Current model values from LiteLLM config:
         process.
 
         Safety:
+        - Enforces a single-instance policy for this LITELLM_CONFIG
         - Checks if port is already in use before starting
         - Respects dry_run flag
         """
+        existing_pids = self._find_litellm_pids()
+        my_pid = str(os.getpid())
+
+        if my_pid in existing_pids:
+            existing_pids.remove(my_pid)
+
+        if existing_pids:
+            print("ERROR: Another LiteLLM instance is already running.")
+            print(
+                "Only one LiteLLM instance can run for this config path when "
+                "started via harinezumigel-llm-stack."
+            )
+            print("Running LiteLLM PID(s):")
+
+            for pid in existing_pids:
+                print(f"  {pid}")
+
+            print()
+            print(
+                "Stop the existing instance first "
+                "(harinezumigel-llm-stack litellm --stop for this config, "
+                "or stop it manually)."
+            )
+            sys.exit(1)
+
         if port_in_use(self.config.litellm_port, self.config.litellm_bind_host):
             print(
                 f"LiteLLM port {self.config.litellm_port} appears to be in use on "
@@ -1853,23 +1879,14 @@ Current model values from LiteLLM config:
             else:
                 start_background_process(["bash", "-lc", command])
 
-    def stop_litellm(self, *, dry_run: bool = False) -> None:
-        """Stop LiteLLM proxy processes.
+    def _find_litellm_pids(self) -> list[str]:
+        """Find LiteLLM process IDs.
 
-        Finds LiteLLM processes by matching command patterns and sends
-        SIGTERM signal to stop them gracefully.
-
-        Safety:
-        - Uses specific pattern matching to avoid wrong processes
-        - Shows PIDs before killing
-        - Uses SIGTERM (graceful shutdown) not SIGKILL
-        - Respects dry_run flag
-        - Includes self-PID protection
+        Matches only processes for this LITELLM_CONFIG.
         """
         patterns = [
             f"{self.config.litellm_bin} --config {self.config.litellm_config}",
             f"litellm --config {self.config.litellm_config}",
-            self.config.litellm_bin,
         ]
 
         pids: list[str] = []
@@ -1888,7 +1905,22 @@ Current model values from LiteLLM config:
                 print(result.stderr.strip())
                 sys.exit(1)
 
-        unique_pids = sorted(set(pids))
+        return sorted(set(pids))
+
+    def stop_litellm(self, *, dry_run: bool = False) -> None:
+        """Stop LiteLLM proxy processes.
+
+        Finds LiteLLM processes by matching command patterns and sends
+        SIGTERM signal to stop them gracefully.
+
+        Safety:
+        - Matches only processes that include this config path
+        - Shows PIDs before killing
+        - Uses SIGTERM (graceful shutdown) not SIGKILL
+        - Respects dry_run flag
+        - Includes self-PID protection
+        """
+        unique_pids = self._find_litellm_pids()
 
         if not unique_pids:
             print("No running LiteLLM process found.")

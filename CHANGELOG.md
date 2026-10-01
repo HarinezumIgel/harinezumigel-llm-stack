@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `harinezumigel-llm-stack.py`: `--recreate` authorization now reads only top-level `rebuild` per `model_list` entry (no `model_info.rebuild` fallback)
 - `harinezumigel-llm-stack.py`: when top-level `rebuild` is missing, recreate is blocked by default and prints an explicit message requiring `rebuild: true`
 - `README.md` and `config.yaml.example`: documented strict top-level `rebuild: true` requirement for `--recreate`
+- `harinezumigel-llm-stack.py`: `stop_litellm` process matching is now scoped to commands that include `--config <LITELLM_CONFIG>` (removed broad binary-only match)
+- `harinezumigel-llm-stack.py`: `start_litellm` now enforces a single-instance policy per `LITELLM_CONFIG` and refuses startup when another process uses the same config path
+- `README.md`: API authentication safety wording now clarifies that auth enforcement is controlled by LiteLLM `master_key` configuration
 
 ### Fixed
 - `install.sh`: avoided circular MCP conflict guidance where recreating the venv could reproduce the same incompatibility introduced by forced dependency pinning

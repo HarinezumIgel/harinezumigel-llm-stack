@@ -389,9 +389,13 @@ harinezumigel-llm-stack litellm --start --show-log
 harinezumigel-llm-stack litellm --stop
 ```
 
+`harinezumigel-llm-stack litellm --start` enforces a single-instance policy per config path.
+If another LiteLLM process is already running with the same `--config` path,
+startup exits and asks you to stop the existing instance first.
+
 The proxy will be available at `http://localhost:4000` (or your configured port).
 
-**Admin UI**: The `/ui` route is always served by LiteLLM — it cannot be disabled via configuration. All API calls require `LITELLM_MASTER_KEY`. To block the UI, use a reverse proxy (e.g. nginx `location /ui { return 403; }`) or a firewall rule.
+**Admin UI**: The `/ui` route is always served by LiteLLM — it cannot be disabled via configuration. API authentication behavior is controlled by your LiteLLM `master_key` configuration. To block the UI, use a reverse proxy (e.g. nginx `location /ui { return 403; }`) or a firewall rule.
 
 **Note**: When using `--show-log`, JSON log lines with `stacktrace` fields are automatically formatted to display stack traces with real newlines for readability.
 
@@ -592,10 +596,11 @@ Starting vLLM container for model: Qwen3-Coder-Next-AWQ
 - **Recreate scoping**: `--recreate` only affects the single named model/alias; requires `--start`
 - **Alias safety**: Duplicate aliases are rejected at startup; unknown aliases exit with a clear error
 - **Rebuild protection**: `--recreate` is allowed only when top-level `rebuild: true` is explicitly set for the model; missing or non-true values block recreate
+- **Single LiteLLM instance policy**: `litellm --start` refuses to launch when another LiteLLM process already runs with the same `--config` path
 - **Process safety**: Kills only LiteLLM processes matching specific patterns
 - **Port validation**: Checks port availability before binding
 - **Self-protection**: Won't kill its own process when stopping LiteLLM
-- **API authentication**: All LiteLLM API calls require `LITELLM_MASTER_KEY`; the `/ui` static files load but are non-functional without auth
+- **API authentication (LiteLLM-controlled)**: This launcher does not enforce auth itself; configure LiteLLM `master_key` to require API auth. The `/ui` static files are still served by LiteLLM.
 
 See [SECURITY.md](SECURITY.md) for vulnerability reporting and security scope.
 

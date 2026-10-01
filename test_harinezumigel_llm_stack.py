@@ -1286,6 +1286,94 @@ class TestSafetyGuards(unittest.TestCase):
             safe_unlink(temp_config)
 
     @patch("harinezumigel_llm_stack.load_env_file")
+    @patch("harinezumigel_llm_stack.run_command")
+    def test_stop_litellm_uses_config_scoped_patterns(self, mock_run: Any, mock_load: Any) -> None:
+        """stop_litellm must search only for processes using this config path."""
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
+
+        config = AppConfig.from_env()
+        stack = LLMStack(config)
+
+        # pgrep returns 1 when no matching process exists.
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="")
+
+        stack.stop_litellm(dry_run=True)
+
+        self.assertEqual(mock_run.call_count, 2)
+        commands = [call.args[0] for call in mock_run.call_args_list]
+        self.assertEqual(
+            commands,
+            [
+                [
+                    "pgrep",
+                    "-f",
+                    f"{config.litellm_bin} --config {config.litellm_config}",
+                ],
+                [
+                    "pgrep",
+                    "-f",
+                    f"litellm --config {config.litellm_config}",
+                ],
+            ],
+        )
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    @patch("harinezumigel_llm_stack.start_background_process")
+    @patch("harinezumigel_llm_stack.port_in_use")
+    @patch("harinezumigel_llm_stack.run_command")
+    def test_start_litellm_blocks_when_config_scoped_instance_exists(
+        self,
+        mock_run: Any,
+        mock_port_in_use: Any,
+        mock_start_background: Any,
+        mock_load: Any,
+    ) -> None:
+        """start_litellm must refuse startup when this config already runs."""
+        import io
+        from contextlib import redirect_stdout
+
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
+
+        config = AppConfig.from_env()
+        stack = LLMStack(config)
+
+        # First pattern matches one running LiteLLM process; second has no matches.
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout="1234\n", stderr=""),
+            MagicMock(returncode=1, stdout="", stderr=""),
+        ]
+        mock_port_in_use.return_value = False
+
+        output = io.StringIO()
+
+        with self.assertRaises(SystemExit):
+            with redirect_stdout(output):
+                stack.start_litellm(dry_run=False, follow_log=False)
+
+        self.assertIn(
+            "Only one LiteLLM instance can run for this config path",
+            output.getvalue(),
+        )
+        commands = [call.args[0] for call in mock_run.call_args_list]
+        self.assertEqual(
+            commands,
+            [
+                [
+                    "pgrep",
+                    "-f",
+                    f"{config.litellm_bin} --config {config.litellm_config}",
+                ],
+                [
+                    "pgrep",
+                    "-f",
+                    f"litellm --config {config.litellm_config}",
+                ],
+            ],
+        )
+        mock_port_in_use.assert_not_called()
+        mock_start_background.assert_not_called()
+
+    @patch("harinezumigel_llm_stack.load_env_file")
     def test_top_level_rebuild_false_blocks_recreate_alias(self, mock_load: Any) -> None:
         """Top-level rebuild: false must block --recreate when starting by alias."""
         import argparse
