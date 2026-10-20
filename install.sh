@@ -285,7 +285,7 @@ echo "=================================="
 echo "Step 6: LiteLLM Virtual Environment Setup (Optional)"
 echo "=================================="
 echo
-echo "LiteLLM requires a Python virtual environment with the 'litellm[proxy]' package."
+echo "LiteLLM requires a Python virtual environment with 'litellm[proxy]' and prisma."
 
 VENV_PATH="$INSTALL_DIR/venv"
 
@@ -305,6 +305,18 @@ install_litellm_proxy_deps() {
             return 1
         fi
         echo -e "${GREEN}✓${NC} litellm[proxy] installed successfully"
+    fi
+
+    # prisma is imported by LiteLLM auth error handlers; ensure it exists
+    # to avoid ModuleNotFoundError during malformed key/auth paths.
+    if "$pip_bin" show prisma >/dev/null 2>&1; then
+        echo -e "${GREEN}✓${NC} prisma is already installed"
+    else
+        if ! "$pip_bin" install prisma; then
+            echo -e "${RED}✗${NC} Failed to install prisma"
+            return 1
+        fi
+        echo -e "${GREEN}✓${NC} prisma installed successfully"
     fi
 
     # Keep dependency resolution owned by litellm[proxy]; explicit pinning here
@@ -372,8 +384,10 @@ else
                 echo
                 echo "Updating .env with venv activation path..."
                 if grep -q "^LITELLM_VENV_ACTIVATE=" "$INSTALL_DIR/.env" 2>/dev/null; then
-                    sed -i.bak "s|^LITELLM_VENV_ACTIVATE=.*|LITELLM_VENV_ACTIVATE=$VENV_PATH/bin/activate|" "$INSTALL_DIR/.env" \
-                        && rm -f "$INSTALL_DIR/.env.bak"
+                    sed -i.bak "s|^LITELLM_VENV_ACTIVATE=.*|LITELLM_VENV_ACTIVATE=$VENV_PATH/bin/activate|" "$INSTALL_DIR/.env"
+                    if [[ -f "$INSTALL_DIR/.env.bak" ]]; then
+                        rm "$INSTALL_DIR/.env.bak"
+                    fi
                 else
                     echo "LITELLM_VENV_ACTIVATE=$VENV_PATH/bin/activate" >> "$INSTALL_DIR/.env"
                 fi
@@ -416,7 +430,7 @@ if [[ ! -d "$INSTALL_DIR/venv" ]]; then
 echo "3. Set up LiteLLM virtual environment (skipped above):"
 echo "   • Create venv: python3 -m venv /opt/litellm/venv"
 echo "   • Activate:      source /opt/litellm/venv/bin/activate"
-echo "   • Install:       pip install 'litellm[proxy]'"
+echo "   • Install:       pip install 'litellm[proxy]' prisma"
 echo "   • Update LITELLM_VENV_ACTIVATE in .env"
 echo
 fi
@@ -479,3 +493,4 @@ echo
 echo -e "${GREEN}Setup complete!${NC}"
 echo "Next: Edit configs, download models, pull Docker image, then run 'harinezumigel-llm-stack --list'"
 echo
+echo -e "${RED}Did you update $INSTALL_DIR/.env to match your LLM setup?${NC}"

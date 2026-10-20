@@ -10,14 +10,17 @@ This module tests the core functionality of the LLM stack launcher including:
 - Model deployment operations
 """
 
+import errno
 import json
 import os
+import runpy
 import socket
 import sys
 import tempfile
 import importlib.util
 import unittest
 from pathlib import Path
+from dataclasses import replace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -117,6 +120,29 @@ class TestEnvironmentLoading(unittest.TestCase):
 
         # Should not raise
         load_env_file("/nonexistent/file.env")
+
+    def test_load_env_file_inline_comments(self):
+        """Strip comments without damaging quoted or embedded hash characters."""
+        cases = [
+            ("localhost    # <YOUR HOST>", "localhost"),
+            ("0.0.0.0\t# <YOUR BIND HOST>", "0.0.0.0"),
+            ("8011 # backend port", "8011"),
+            ('"value # literal" # comment', "value # literal"),
+            ("'value # literal' # comment", "value # literal"),
+            ("secret#suffix # comment", "secret#suffix"),
+            ("# comment only", ""),
+            ('"" # empty value', ""),
+            ('"  padded # literal  " # comment', "  padded # literal  "),
+            ('"say \\"hi # literal\\"" # comment', 'say \\"hi # literal\\"'),
+        ]
+        with patch.dict(os.environ):
+            for raw_value, expected in cases:
+                with self.subTest(raw_value=raw_value):
+                    with tempfile.TemporaryDirectory() as directory:
+                        env_path = Path(directory) / ".env"
+                        env_path.write_text(f"TEST_INLINE={raw_value}\n", encoding="utf-8")
+                        harinezumigel_llm_stack.load_env_file(str(env_path))
+                    self.assertEqual(os.environ["TEST_INLINE"], expected)
 
     def test_env_string_required(self):
         """Test env_string with required flag."""
@@ -273,6 +299,26 @@ class TestUtilityFunctions(unittest.TestCase):
         time.sleep(0.1)
         self.assertFalse(port_in_use(port, "127.0.0.1"))
 
+    @patch("harinezumigel_llm_stack.socket.socket")
+    def test_port_in_use_reports_bind_errors(self, mock_socket: Any) -> None:
+        """Do not misreport invalid hosts or permission errors as occupied ports."""
+        errors = [
+            socket.gaierror(socket.EAI_NONAME, "Name or service not known"),
+            OSError(errno.EADDRNOTAVAIL, "Cannot assign requested address"),
+            PermissionError(errno.EACCES, "Permission denied"),
+        ]
+        for error in errors:
+            with self.subTest(error=error):
+                mock_socket.return_value.bind.side_effect = error
+                with patch("builtins.print") as mock_print:
+                    with self.assertRaises(SystemExit) as context:
+                        harinezumigel_llm_stack.port_in_use(8011, "invalid-host")
+                self.assertEqual(context.exception.code, 1)
+                mock_print.assert_called_once_with(
+                    f"ERROR: Could not check port 8011 on invalid-host: {error}"
+                )
+                mock_socket.return_value.close.assert_called()
+
     def test_redact_command(self):
         """Test redact_command for sensitive data."""
         from harinezumigel_llm_stack import redact_command # type: ignore
@@ -358,6 +404,37 @@ class TestFormatLogLine(unittest.TestCase):
         result = _format_log_line(plain_text)
         self.assertEqual(result, plain_text)
 
+    def test_format_log_line_pretty_debug_json(self):
+        """Test _format_log_line pretty debug output for JSON records."""
+        from harinezumigel_llm_stack import _format_log_line # type: ignore
+
+        log_obj = {
+            "timestamp": "2026-10-18T09:00:00",
+            "level": "DEBUG",
+            "component": "LiteLLM",
+            "logger": "proxy.py:42",
+            "message": "Debug message",
+            "extra": "value",
+            "stacktrace": "line1\\nline2",
+        }
+        log_line = json.dumps(log_obj)
+
+        result = _format_log_line(log_line, pretty_debug=True)
+
+        self.assertIn("[2026-10-18T09:00:00] DEBUG", result)
+        self.assertIn("LiteLLM (proxy.py:42)", result)
+        self.assertIn("Debug message", result)
+        self.assertIn("extra=value", result)
+        self.assertIn("stacktrace:\nline1\\nline2", result)
+
+    def test_format_log_line_pretty_debug_non_json(self):
+        """Test _format_log_line pretty debug output for plain text records."""
+        from harinezumigel_llm_stack import _format_log_line # type: ignore
+
+        plain_text = "plain line"
+        result = _format_log_line(plain_text, pretty_debug=True)
+        self.assertEqual(result, plain_text)
+
 
 class TestAppConfig(unittest.TestCase):
     """Test AppConfig dataclass."""
@@ -391,12 +468,15 @@ class TestAppConfig(unittest.TestCase):
     @patch("harinezumigel_llm_stack.load_env_file")
     def test_app_config_from_env(self, mock_load: Any) -> None:
         """Test AppConfig.from_env() loads all required fields."""
-        from harinezumigel_llm_stack import AppConfig # type: ignore
+        from harinezumigel_llm_stack import AppConfig, INSTALLED_BASE  # type: ignore
 
         config = AppConfig.from_env()
 
         self.assertEqual(config.litellm_config, "/opt/litellm/config.yaml")
         self.assertEqual(config.model_root, "/models")
+        self.assertEqual(
+            config.env_file, os.environ.get("HLS_ENV_FILE", str(INSTALLED_BASE / ".env"))
+        )
         self.assertEqual(config.litellm_port, 4000)
         self.assertEqual(config.vllm_container_port, 8000)
         self.assertEqual(config.vllm_auto_port_start, 8001)
@@ -407,10 +487,19 @@ class TestAppConfig(unittest.TestCase):
         """Test AppConfig.from_env() fails with missing required vars."""
         from harinezumigel_llm_stack import AppConfig # type: ignore
 
-        os.environ.pop("LITELLM_CONFIG")
+        os.environ.pop("MODEL_ROOT")
 
         with self.assertRaises(SystemExit):
             AppConfig.from_env()
+
+    def test_app_config_derives_config_path_from_installed_base(self) -> None:
+        """The installed base determines the config path, not the environment."""
+        with (
+            patch.object(harinezumigel_llm_stack, "INSTALLED_BASE", Path("/test/install")),
+            patch.dict(os.environ, {"LITELLM_CONFIG": "/ignored/config.yaml"}),
+        ):
+            config = harinezumigel_llm_stack.AppConfig.from_env()
+        self.assertEqual(config.litellm_config, "/test/install/config.yaml")
 
 
 class TestModelRequirements(unittest.TestCase):
@@ -506,12 +595,43 @@ class TestLLMStackInit(unittest.TestCase):
         self.assertEqual(host, "127.0.0.1")
         self.assertEqual(port, 9000)
 
+        for url, expected_port in [
+            ("http://localhost/v1", 80),
+            ("https://localhost/v1", 443),
+        ]:
+            with self.subTest(url=url):
+                self.assertEqual(stack._parse_api_base(url), ("localhost", expected_port))
+
+    def test_example_env_preserves_backend_host_and_port(self):
+        """Host comments must not hide the backend port in expanded API URLs."""
+        with patch.dict(os.environ, clear=True):
+            harinezumigel_llm_stack.load_env_file(str(SCRIPT_DIR / ".env.example"))
+            with patch("harinezumigel_llm_stack.load_env_file"):
+                config = harinezumigel_llm_stack.AppConfig.from_env()
+            stack = harinezumigel_llm_stack.LLMStack(config)
+            api_base = os.environ["QWEN3_CODER_30B_A3B_INSTRUCT_API_BASE"]
+
+            self.assertEqual(config.vllm_host, "localhost")
+            self.assertEqual(config.vllm_bind_host, "0.0.0.0")
+            self.assertEqual(api_base, "http://localhost:8011/v1")
+            self.assertEqual(
+                stack._parse_api_base(api_base),
+                (config.vllm_host, 8011),
+            )
+
 
 class TestLLMStackDockerOperations(unittest.TestCase):
     """Test LLMStack Docker-related operations."""
 
     def setUp(self):
         """Set up test configuration."""
+        log_root = tempfile.TemporaryDirectory()
+        self.addCleanup(log_root.cleanup)
+        root_patch = patch.object(
+            harinezumigel_llm_stack, "INSTALLED_BASE", Path(log_root.name)
+        )
+        root_patch.start()
+        self.addCleanup(root_patch.stop)
         self.env_vars = {
             "LITELLM_CONFIG": "/opt/litellm/config.yaml",
             "MODEL_ROOT": "/models",
@@ -722,6 +842,260 @@ class TestLLMStackDockerOperations(unittest.TestCase):
         self.assertFalse(any(part.startswith("--ipc=") for part in command))
 
     @patch("harinezumigel_llm_stack.load_env_file")
+    def test_build_vllm_command_includes_reasoning_config_flag(self, mock_load: Any) -> None:
+        """Normalize parser settings and preserve additional reasoning options."""
+        from harinezumigel_llm_stack import AppConfig, LLMStack, ModelDeployment # type: ignore
+
+        config = AppConfig.from_env()
+        stack = LLMStack(config)
+
+        model = ModelDeployment(
+            name="test_model",
+            backend_model="openai/test_model",
+            api_base="http://localhost:8001/v1",
+            api_key="sk-test",
+            api_base_host="localhost",
+            api_base_port=8001,
+            litellm_params={},
+            model_info={"reasoning_config": {"reasoning_parser": "qwen3"}},
+            context_length=4096,
+            max_input_tokens=3000,
+            max_output_tokens=1000,
+            gpu_memory_utilization=0.9,
+            max_num_seqs=None,
+            dtype="auto",
+            license=None,
+            upstream=None,
+            alias=None,
+            description=None,
+            detail=None,
+            allow_rebuild=True,
+        )
+
+        runtime: dict[str, int | float | str | None] = {
+            "context_length": 4096,
+            "max_input_tokens": 3000,
+            "max_output_tokens": 1000,
+            "gpu_memory_utilization": 0.9,
+            "max_num_seqs": None,
+            "dtype": "auto",
+        }
+        for as_json in (False, True):
+            for top_level_parser in (None, "qwen3", "deepseek_r1"):
+                for extra_options in ({}, {"reasoning_end_str": "</think>"}):
+                    with self.subTest(
+                        as_json=as_json,
+                        top_level_parser=top_level_parser,
+                        extra_options=extra_options,
+                    ):
+                        reasoning_options = {
+                            "reasoning_parser": "qwen3",
+                            **extra_options,
+                        }
+                        model.model_info = {
+                            "reasoning_config": (
+                                json.dumps(reasoning_options)
+                                if as_json
+                                else reasoning_options
+                            ),
+                            "reasoning_parser": top_level_parser,
+                        }
+                        if top_level_parser == "deepseek_r1":
+                            with self.assertRaises(SystemExit):
+                                stack._build_vllm_command(
+                                    model, Path("/models/test-model"), 8001, runtime
+                                )
+                            continue
+
+                        command = stack._build_vllm_command(
+                            model, Path("/models/test-model"), 8001, runtime
+                        )
+                        self.assertEqual(command.count("--reasoning-parser"), 1)
+                        parser_index = command.index("--reasoning-parser")
+                        self.assertEqual(command[parser_index + 1], "qwen3")
+                        if extra_options:
+                            config_index = command.index("--reasoning-config")
+                            self.assertEqual(
+                                json.loads(command[config_index + 1]), extra_options
+                            )
+                        else:
+                            self.assertNotIn("--reasoning-config", command)
+                        self.assertNotIn("--enable-reasoning", command)
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    def test_build_vllm_command_rejects_legacy_reasoning_config_enable_flag(
+        self,
+        mock_load: Any,
+    ) -> None:
+        """Legacy reasoning_config.enable_reasoning should fail fast."""
+        from harinezumigel_llm_stack import AppConfig, LLMStack, ModelDeployment # type: ignore
+
+        config = AppConfig.from_env()
+        stack = LLMStack(config)
+
+        model = ModelDeployment(
+            name="test_model",
+            backend_model="openai/test_model",
+            api_base="http://localhost:8001/v1",
+            api_key="sk-test",
+            api_base_host="localhost",
+            api_base_port=8001,
+            litellm_params={},
+            model_info={
+                "reasoning_config": {"enable_reasoning": True},
+                "reasoning_parser": "qwen3",
+            },
+            context_length=4096,
+            max_input_tokens=3000,
+            max_output_tokens=1000,
+            gpu_memory_utilization=0.9,
+            max_num_seqs=None,
+            dtype="auto",
+            license=None,
+            upstream=None,
+            alias=None,
+            description=None,
+            detail=None,
+            allow_rebuild=True,
+        )
+
+        runtime: dict[str, int | float | str | None] = {
+            "context_length": 4096,
+            "max_input_tokens": 3000,
+            "max_output_tokens": 1000,
+            "gpu_memory_utilization": 0.9,
+            "max_num_seqs": None,
+            "dtype": "auto",
+        }
+
+        with self.assertRaises(SystemExit):
+            stack._build_vllm_command(
+                model,
+                Path("/models/test-model"),
+                8001,
+                runtime,
+            )
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    def test_build_vllm_command_includes_attention_config_flag(self, mock_load: Any) -> None:
+        """model_info.attention_config should add --attention-config."""
+        from harinezumigel_llm_stack import AppConfig, LLMStack, ModelDeployment # type: ignore
+
+        config = AppConfig.from_env()
+        stack = LLMStack(config)
+
+        model = ModelDeployment(
+            name="test_model",
+            backend_model="openai/test_model",
+            api_base="http://localhost:8001/v1",
+            api_key="sk-test",
+            api_base_host="localhost",
+            api_base_port=8001,
+            litellm_params={},
+            model_info={"attention_config": {"backend": "flashinfer"}},
+            context_length=4096,
+            max_input_tokens=3000,
+            max_output_tokens=1000,
+            gpu_memory_utilization=0.9,
+            max_num_seqs=None,
+            dtype="auto",
+            license=None,
+            upstream=None,
+            alias=None,
+            description=None,
+            detail=None,
+            allow_rebuild=True,
+        )
+
+        runtime: dict[str, int | float | str | None] = {
+            "context_length": 4096,
+            "max_input_tokens": 3000,
+            "max_output_tokens": 1000,
+            "gpu_memory_utilization": 0.9,
+            "max_num_seqs": None,
+            "dtype": "auto",
+        }
+        command = stack._build_vllm_command(
+            model,
+            Path("/models/test-model"),
+            8001,
+            runtime,
+        )
+
+        self.assertIn("--attention-config", command)
+        attention_config_index = command.index("--attention-config")
+        self.assertEqual(command[attention_config_index + 1], '{"backend":"flashinfer"}')
+
+        for config_key, config_value in (
+            ("compilation_config", {"mode": "max-autotune"}),
+            ("structured_outputs_config", {"backend": "xgrammar"}),
+        ):
+            flag = f"--{config_key.replace('_', '-')}"
+            self.assertNotIn(flag, command)
+            for value in (config_value, json.dumps(config_value)):
+                with self.subTest(config_key=config_key, value=value):
+                    model.model_info = {config_key: value}
+                    configured_command = stack._build_vllm_command(
+                        model, Path("/models/test-model"), 8001, runtime
+                    )
+                    self.assertEqual(configured_command.count(flag), 1)
+                    self.assertEqual(
+                        json.loads(configured_command[configured_command.index(flag) + 1]),
+                        config_value,
+                    )
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    def test_build_vllm_command_omits_reasoning_config_flag_by_default(
+        self,
+        mock_load: Any,
+    ) -> None:
+        """Without model_info.reasoning_config, --reasoning-config should be omitted."""
+        from harinezumigel_llm_stack import AppConfig, LLMStack, ModelDeployment # type: ignore
+
+        config = AppConfig.from_env()
+        stack = LLMStack(config)
+
+        model = ModelDeployment(
+            name="test_model",
+            backend_model="openai/test_model",
+            api_base="http://localhost:8001/v1",
+            api_key="sk-test",
+            api_base_host="localhost",
+            api_base_port=8001,
+            litellm_params={},
+            model_info={},
+            context_length=4096,
+            max_input_tokens=3000,
+            max_output_tokens=1000,
+            gpu_memory_utilization=0.9,
+            max_num_seqs=None,
+            dtype="auto",
+            license=None,
+            upstream=None,
+            alias=None,
+            description=None,
+            detail=None,
+            allow_rebuild=True,
+        )
+
+        runtime: dict[str, int | float | str | None] = {
+            "context_length": 4096,
+            "max_input_tokens": 3000,
+            "max_output_tokens": 1000,
+            "gpu_memory_utilization": 0.9,
+            "max_num_seqs": None,
+            "dtype": "auto",
+        }
+        command = stack._build_vllm_command(
+            model,
+            Path("/models/test-model"),
+            8001,
+            runtime,
+        )
+
+        self.assertNotIn("--reasoning-config", command)
+
+    @patch("harinezumigel_llm_stack.load_env_file")
     @patch("harinezumigel_llm_stack.run_command")
     def test_preflight_nvidia_driver_check_success(self, mock_run: Any, mock_load: Any) -> None:
         """Preflight should pass when docker GPU probe succeeds."""
@@ -789,31 +1163,311 @@ class TestLLMStackDockerOperations(unittest.TestCase):
 
     @patch("harinezumigel_llm_stack.load_env_file")
     @patch("harinezumigel_llm_stack.run_command")
-    @patch("harinezumigel_llm_stack.Path.exists")
-    def test_clean_vllm_logs_skips_missing_log_file(
+    def test_clean_vllm_logs_attempts_truncate_when_path_is_safe(
         self,
-        mock_exists: Any,
         mock_run: Any,
         mock_load: Any,
     ) -> None:
-        """Missing Docker log files should be skipped before truncate."""
+        """Docker log cleanup should delegate missing-file handling to sudo truncate."""
         from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
 
         config = AppConfig.from_env()
         stack = LLMStack(config)
-
-        mock_exists.return_value = False
+        docker_log_path = "/var/lib/docker/containers/test/test-json.log"
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="No such file")
 
         with patch.object(stack, "_resolve_model_name", return_value="test_model"):
             with patch.object(stack, "_find_all_vllm_containers", return_value=["vllm-test_model-8001"]):
                 with patch.object(
                     stack,
                     "_docker_container_log_path",
-                    return_value="/var/lib/docker/containers/test/test-json.log",
+                    return_value=docker_log_path,
+                ):
+                    stack.clean_vllm_logs("test_model", dry_run=False)
+
+        mock_run.assert_called_once_with(
+            ["sudo", "truncate", "-s", "0", docker_log_path],
+            capture=True,
+        )
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    @patch("harinezumigel_llm_stack.run_command")
+    def test_clean_vllm_logs_skips_unexpected_log_path(
+        self,
+        mock_run: Any,
+        mock_load: Any,
+    ) -> None:
+        """Docker log clean should skip paths outside Docker log root."""
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
+
+        config = AppConfig.from_env()
+        stack = LLMStack(config)
+
+        with patch.object(stack, "_resolve_model_name", return_value="test_model"):
+            with patch.object(stack, "_find_all_vllm_containers", return_value=["vllm-test_model-8001"]):
+                with patch.object(
+                    stack,
+                    "_docker_container_log_path",
+                    return_value="/tmp/unmanaged.log",
                 ):
                     stack.clean_vllm_logs("test_model", dry_run=False)
 
         mock_run.assert_not_called()
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    @patch("harinezumigel_llm_stack.run_command")
+    def test_docker_remove_container_rejects_unmanaged_name(
+        self,
+        mock_run: Any,
+        mock_load: Any,
+    ) -> None:
+        """Container removal should reject names outside managed vLLM prefix."""
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
+
+        config = AppConfig.from_env()
+        stack = LLMStack(config)
+
+        with self.assertRaises(SystemExit):
+            stack._docker_remove_container("postgres", dry_run=False)
+
+        mock_run.assert_not_called()
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    @patch("harinezumigel_llm_stack.run_command")
+    def test_clean_litellm_logs_skips_unexpected_log_path(
+        self,
+        mock_run: Any,
+        mock_load: Any,
+    ) -> None:
+        """A configured path must not change the fixed LiteLLM logs directory."""
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
+
+        os.environ["LITELLM_LOG_FILE"] = "relative.log"
+
+        try:
+            config = AppConfig.from_env()
+            stack = LLMStack(config)
+
+            stack.clean_litellm_logs(dry_run=False)
+
+            mock_run.assert_not_called()
+            self.assertEqual(
+                stack._litellm_logs_dir(), harinezumigel_llm_stack.INSTALLED_BASE / "logs"
+            )
+        finally:
+            os.environ.pop("LITELLM_LOG_FILE", None)
+
+    def test_startup_missing_deployment_aborts(self) -> None:
+        """Missing installation aborts before environment loading or dispatch."""
+        with (
+            patch.object(Path, "is_dir", return_value=False),
+            patch.object(Path, "open") as mock_open,
+            patch.object(Path, "mkdir") as mock_mkdir,
+            patch.dict(os.environ, {}, clear=True),
+            patch("builtins.print") as mock_print,
+        ):
+            with self.assertRaises(SystemExit) as caught:
+                runpy.run_path(str(SCRIPT_DIR / "harinezumigel-llm-stack.py"))
+            self.assertEqual(caught.exception.code, 1)
+            mock_print.assert_called_once_with(
+                "ERROR: LiteLLM deployment directory does not exist: /opt/litellm"
+            )
+            mock_open.assert_not_called()
+            mock_mkdir.assert_not_called()
+
+    def test_startup_non_absolute_base_aborts(self) -> None:
+        """Non-absolute bases abort before filesystem checks or environment loading."""
+        with (
+            patch.object(Path, "is_absolute", return_value=False),
+            patch.object(Path, "is_dir") as mock_is_dir,
+            patch.object(Path, "open") as mock_open,
+            patch.object(Path, "mkdir") as mock_mkdir,
+            patch("builtins.print") as mock_print,
+        ):
+            with self.assertRaises(SystemExit) as caught:
+                runpy.run_path(str(SCRIPT_DIR / "harinezumigel-llm-stack.py"))
+            self.assertEqual(caught.exception.code, 1)
+            mock_print.assert_called_once_with(
+                "ERROR: INSTALLED_BASE must be an absolute path: /opt/litellm"
+            )
+            mock_is_dir.assert_not_called()
+            mock_open.assert_not_called()
+            mock_mkdir.assert_not_called()
+
+    def test_litellm_logs_directory_created(self) -> None:
+        """Log access creates only the deployment's logs subdirectory."""
+        stack = harinezumigel_llm_stack.LLMStack(
+            harinezumigel_llm_stack.AppConfig.from_env()
+        )
+        logs_dir = harinezumigel_llm_stack.INSTALLED_BASE / "logs"
+        self.assertFalse(logs_dir.exists())
+        self.assertEqual(stack._litellm_logs_dir(), logs_dir)
+        self.assertTrue(logs_dir.is_dir())
+
+    def test_clean_litellm_logs_missing_directory_is_not_created(self) -> None:
+        """Cleaning absent logs leaves the directory absent."""
+        stack = harinezumigel_llm_stack.LLMStack(
+            harinezumigel_llm_stack.AppConfig.from_env()
+        )
+        stack.clean_litellm_logs()
+        self.assertFalse((harinezumigel_llm_stack.INSTALLED_BASE / "logs").exists())
+
+    def test_clean_litellm_logs_dry_run_preserves_files(self) -> None:
+        """Dry-run cleanup must leave existing logs untouched."""
+        stack = harinezumigel_llm_stack.LLMStack(
+            harinezumigel_llm_stack.AppConfig.from_env()
+        )
+        log_path = stack._litellm_logs_dir() / "litellm.log"
+        log_path.write_text("keep", encoding="utf-8")
+        stack.clean_litellm_logs(dry_run=True)
+        self.assertEqual(log_path.read_text(encoding="utf-8"), "keep")
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    def test_show_litellm_logs_enables_pretty_format_on_debug(self, mock_load: Any) -> None:
+        """show_litellm_logs should use pretty formatting when debug is enabled."""
+        import tempfile
+        import yaml  # type: ignore
+
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
+
+        config_data = {
+            "litellm_settings": {
+                "debug": True,
+                "detailed_debug": False,
+            }
+        }
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            yaml.dump(config_data, f)
+            temp_config = f.name
+
+        old_config = os.environ.get("LITELLM_CONFIG")
+
+        try:
+            config = replace(AppConfig.from_env(), litellm_config=temp_config)
+            stack = LLMStack(config)
+
+            fake_log_path = Path(tempfile.gettempdir()) / "litellm-debug-test.log"
+
+            with patch.object(stack, "_find_litellm_pids", return_value=[]):
+                with patch.object(stack, "_litellm_log_path", return_value=fake_log_path):
+                    with patch.object(stack, "_tail_file_logs", return_value=0) as mock_tail:
+                        stack.show_litellm_logs(tail="10", follow=False, show_log_path=False)
+
+            mock_tail.assert_called_once_with(
+                fake_log_path,
+                tail="10",
+                follow=False,
+                pretty_debug=True,
+            )
+        finally:
+            if old_config is None:
+                os.environ.pop("LITELLM_CONFIG", None)
+            else:
+                os.environ["LITELLM_CONFIG"] = old_config
+            safe_unlink(temp_config)
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    def test_show_litellm_logs_enables_pretty_format_on_detailed_debug(
+        self,
+        mock_load: Any,
+    ) -> None:
+        """show_litellm_logs should use pretty formatting when detailed_debug is enabled."""
+        import tempfile
+        import yaml  # type: ignore
+
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
+
+        config_data = {
+            "litellm_settings": {
+                "debug": False,
+                "detailed_debug": True,
+            }
+        }
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            yaml.dump(config_data, f)
+            temp_config = f.name
+
+        old_config = os.environ.get("LITELLM_CONFIG")
+
+        try:
+            config = replace(AppConfig.from_env(), litellm_config=temp_config)
+            stack = LLMStack(config)
+
+            fake_log_path = Path(tempfile.gettempdir()) / "litellm-detailed-debug-test.log"
+
+            with patch.object(stack, "_find_litellm_pids", return_value=[]):
+                with patch.object(stack, "_litellm_log_path", return_value=fake_log_path):
+                    with patch.object(stack, "_tail_file_logs", return_value=0) as mock_tail:
+                        stack.show_litellm_logs(tail="10", follow=False, show_log_path=False)
+
+            mock_tail.assert_called_once_with(
+                fake_log_path,
+                tail="10",
+                follow=False,
+                pretty_debug=True,
+            )
+        finally:
+            if old_config is None:
+                os.environ.pop("LITELLM_CONFIG", None)
+            else:
+                os.environ["LITELLM_CONFIG"] = old_config
+            safe_unlink(temp_config)
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    def test_handle_logs_all_show_log_includes_litellm_paths(self, mock_load: Any) -> None:
+        """all --show-log should show vLLM and LiteLLM log paths."""
+        import argparse
+
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
+
+        config = AppConfig.from_env()
+        stack = LLMStack(config)
+
+        args = argparse.Namespace(
+            model="all",
+            start=False,
+            show_log=True,
+            show_log_path=False,
+            clean_log=False,
+            dry_run=False,
+            follow=False,
+            tail="200",
+        )
+
+        with patch.object(stack, "show_all_log_paths") as mock_show_all_log_paths:
+            handled = stack.handle_logs(args)
+
+        self.assertTrue(handled)
+        mock_show_all_log_paths.assert_called_once_with()
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    def test_handle_logs_litellm_clean_calls_litellm_clean(self, mock_load: Any) -> None:
+        """litellm --clean-log should route to clean_litellm_logs."""
+        import argparse
+
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
+
+        config = AppConfig.from_env()
+        stack = LLMStack(config)
+
+        args = argparse.Namespace(
+            model="litellm",
+            start=False,
+            show_log=False,
+            show_log_path=False,
+            clean_log=True,
+            dry_run=True,
+            follow=False,
+            tail="200",
+        )
+
+        with patch.object(stack, "clean_litellm_logs") as mock_clean_litellm_logs:
+            handled = stack.handle_logs(args)
+
+        self.assertTrue(handled)
+        mock_clean_litellm_logs.assert_called_once_with(dry_run=True)
 
 
 class TestLLMStackModelResolution(unittest.TestCase):
@@ -958,6 +1612,13 @@ class TestSafetyGuards(unittest.TestCase):
     """Test that destructive operations are properly guarded."""
 
     def setUp(self):
+        log_root = tempfile.TemporaryDirectory()
+        self.addCleanup(log_root.cleanup)
+        root_patch = patch.object(
+            harinezumigel_llm_stack, "INSTALLED_BASE", Path(log_root.name)
+        )
+        root_patch.start()
+        self.addCleanup(root_patch.stop)
         self.env_vars = {
             "LITELLM_CONFIG": "/opt/litellm/config.yaml",
             "MODEL_ROOT": "/models",
@@ -1028,11 +1689,56 @@ class TestSafetyGuards(unittest.TestCase):
             temp_config = f.name
 
         try:
-            os.environ["LITELLM_CONFIG"] = temp_config
-            config = AppConfig.from_env()
+            config = replace(AppConfig.from_env(), litellm_config=temp_config)
             stack = LLMStack(config)
             with self.assertRaises(SystemExit):
                 stack.load_models()
+        finally:
+            safe_unlink(temp_config)
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    def test_load_models_reads_litellm_runtime_settings(self, mock_load: Any) -> None:
+        """load_models should parse keep_alive and debug flags from litellm_settings."""
+        import tempfile
+        import yaml  # type: ignore
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
+
+        config_data = {
+            "model_list": [
+                {
+                    "model_name": "model_a",
+                    "litellm_params": {
+                        "model": "openai/model_a",
+                        "api_base": "http://localhost:8001/v1",
+                        "api_key": "sk-test",
+                    },
+                    "model_info": {
+                        "context_length": 4096,
+                        "max_input_tokens": 3000,
+                        "max_output_tokens": 512,
+                        "gpu_memory_utilization": 0.9,
+                    },
+                }
+            ],
+            "litellm_settings": {
+                "keep_alive": 30,
+                "debug": True,
+                "detailed_debug": False,
+            },
+        }
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            yaml.dump(config_data, f)
+            temp_config = f.name
+
+        try:
+            config = replace(AppConfig.from_env(), litellm_config=temp_config)
+            stack = LLMStack(config)
+            stack.load_models()
+
+            self.assertEqual(stack.litellm_keep_alive, 30.0)
+            self.assertTrue(stack.litellm_debug)
+            self.assertFalse(stack.litellm_detailed_debug)
         finally:
             safe_unlink(temp_config)
 
@@ -1068,8 +1774,7 @@ class TestSafetyGuards(unittest.TestCase):
             temp_config = f.name
 
         try:
-            os.environ["LITELLM_CONFIG"] = temp_config
-            config = AppConfig.from_env()
+            config = replace(AppConfig.from_env(), litellm_config=temp_config)
             stack = LLMStack(config)
 
             args = argparse.Namespace(
@@ -1134,8 +1839,7 @@ class TestSafetyGuards(unittest.TestCase):
             temp_config = f.name
 
         try:
-            os.environ["LITELLM_CONFIG"] = temp_config
-            config = AppConfig.from_env()
+            config = replace(AppConfig.from_env(), litellm_config=temp_config)
             stack = LLMStack(config)
 
             args = argparse.Namespace(
@@ -1183,8 +1887,7 @@ class TestSafetyGuards(unittest.TestCase):
             temp_config = f.name
 
         try:
-            os.environ["LITELLM_CONFIG"] = temp_config
-            config = AppConfig.from_env()
+            config = replace(AppConfig.from_env(), litellm_config=temp_config)
             stack = LLMStack(config)
 
             for model_name in ("litellm", "llm-lite", "lite-llm"):
@@ -1215,6 +1918,106 @@ class TestSafetyGuards(unittest.TestCase):
                     )
                     with self.assertRaises(SystemExit):
                         stack.run(args)
+        finally:
+            safe_unlink(temp_config)
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    def test_litellm_show_log_path_is_supported(self, mock_load: Any) -> None:
+        """litellm target should support --show-log-path."""
+        import argparse
+        import tempfile
+        import yaml  # type: ignore
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
+
+        config_data = {"model_list": []}
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            yaml.dump(config_data, f)
+            temp_config = f.name
+
+        try:
+            config = replace(AppConfig.from_env(), litellm_config=temp_config)
+            stack = LLMStack(config)
+
+            args = argparse.Namespace(
+                model="litellm",
+                start=False,
+                stop=False,
+                recreate=False,
+                no_reuse_existing=False,
+                dry_run=False,
+                show_log=False,
+                show_log_path=True,
+                clean_log=False,
+                follow=False,
+                tail="200",
+                ps=False,
+                list=False,
+                help=False,
+                port=None,
+                auto_port=False,
+                context_length=None,
+                max_input_tokens=None,
+                max_output_tokens=None,
+                gpu_memory_utilization=None,
+                max_num_seqs=None,
+                dtype=None,
+            )
+
+            with patch.object(stack, "show_litellm_log_path") as mock_show_litellm_log_path:
+                stack.run(args)
+
+            mock_show_litellm_log_path.assert_called_once_with()
+        finally:
+            safe_unlink(temp_config)
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    def test_litellm_clean_log_is_supported(self, mock_load: Any) -> None:
+        """litellm target should support --clean-log."""
+        import argparse
+        import tempfile
+        import yaml  # type: ignore
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
+
+        config_data = {"model_list": []}
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            yaml.dump(config_data, f)
+            temp_config = f.name
+
+        try:
+            config = replace(AppConfig.from_env(), litellm_config=temp_config)
+            stack = LLMStack(config)
+
+            args = argparse.Namespace(
+                model="litellm",
+                start=False,
+                stop=False,
+                recreate=False,
+                no_reuse_existing=False,
+                dry_run=True,
+                show_log=False,
+                show_log_path=False,
+                clean_log=True,
+                follow=False,
+                tail="200",
+                ps=False,
+                list=False,
+                help=False,
+                port=None,
+                auto_port=False,
+                context_length=None,
+                max_input_tokens=None,
+                max_output_tokens=None,
+                gpu_memory_utilization=None,
+                max_num_seqs=None,
+                dtype=None,
+            )
+
+            with patch.object(stack, "clean_litellm_logs") as mock_clean_litellm_logs:
+                stack.run(args)
+
+            mock_clean_litellm_logs.assert_called_once_with(dry_run=True)
         finally:
             safe_unlink(temp_config)
 
@@ -1251,8 +2054,7 @@ class TestSafetyGuards(unittest.TestCase):
             temp_config = f.name
 
         try:
-            os.environ["LITELLM_CONFIG"] = temp_config
-            config = AppConfig.from_env()
+            config = replace(AppConfig.from_env(), litellm_config=temp_config)
             stack = LLMStack(config)
 
             args = argparse.Namespace(
@@ -1299,23 +2101,45 @@ class TestSafetyGuards(unittest.TestCase):
 
         stack.stop_litellm(dry_run=True)
 
-        self.assertEqual(mock_run.call_count, 2)
+        self.assertEqual(mock_run.call_count, 1)
         commands = [call.args[0] for call in mock_run.call_args_list]
         self.assertEqual(
             commands,
             [
                 [
                     "pgrep",
-                    "-f",
-                    f"{config.litellm_bin} --config {config.litellm_config}",
-                ],
-                [
-                    "pgrep",
-                    "-f",
-                    f"litellm --config {config.litellm_config}",
+                    "-fa",
+                    "litellm",
                 ],
             ],
         )
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    @patch("harinezumigel_llm_stack.run_command")
+    def test_find_litellm_pids_filters_non_process_matches(
+        self,
+        mock_run: Any,
+        mock_load: Any,
+    ) -> None:
+        """Only true LiteLLM process argv entries should be matched."""
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
+
+        config = AppConfig.from_env()
+        stack = LLMStack(config)
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=(
+                f"1001 logview --name litellm --config {config.litellm_config}\n"
+                f"1002 bash -lc litellm --config {config.litellm_config}\n"
+                f"1003 {config.litellm_bin} --config {config.litellm_config} --port 4000\n"
+                f"1004 python3 {config.litellm_bin} --config={config.litellm_config} --port 4001\n"
+                "1005 litellm --config /tmp/other-config.yaml --port 4010\n"
+            ),
+            stderr="",
+        )
+
+        self.assertEqual(stack._find_litellm_pids(), ["1003", "1004"])
 
     @patch("harinezumigel_llm_stack.load_env_file")
     @patch("harinezumigel_llm_stack.start_background_process")
@@ -1337,11 +2161,11 @@ class TestSafetyGuards(unittest.TestCase):
         config = AppConfig.from_env()
         stack = LLMStack(config)
 
-        # First pattern matches one running LiteLLM process; second has no matches.
-        mock_run.side_effect = [
-            MagicMock(returncode=0, stdout="1234\n", stderr=""),
-            MagicMock(returncode=1, stdout="", stderr=""),
-        ]
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=f"1234 {config.litellm_bin} --config {config.litellm_config} --port 4000\n",
+            stderr="",
+        )
         mock_port_in_use.return_value = False
 
         output = io.StringIO()
@@ -1360,18 +2184,147 @@ class TestSafetyGuards(unittest.TestCase):
             [
                 [
                     "pgrep",
-                    "-f",
-                    f"{config.litellm_bin} --config {config.litellm_config}",
-                ],
-                [
-                    "pgrep",
-                    "-f",
-                    f"litellm --config {config.litellm_config}",
+                    "-fa",
+                    "litellm",
                 ],
             ],
         )
         mock_port_in_use.assert_not_called()
         mock_start_background.assert_not_called()
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    @patch("harinezumigel_llm_stack.start_background_process")
+    @patch("harinezumigel_llm_stack.port_in_use")
+    @patch("harinezumigel_llm_stack.run_command")
+    def test_start_litellm_background_redirects_to_log_file(
+        self,
+        mock_run: Any,
+        mock_port_in_use: Any,
+        mock_start_background: Any,
+        mock_load: Any,
+    ) -> None:
+        """Detached startup writes timestamped logs under the installed base."""
+        import shlex
+        import tempfile
+
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.object(
+                harinezumigel_llm_stack, "INSTALLED_BASE", Path(temp_dir)
+            ):
+                config = AppConfig.from_env()
+                stack = LLMStack(config)
+
+                # pgrep returns 1 when no matching process exists.
+                mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="")
+                mock_port_in_use.return_value = False
+
+                stack.start_litellm(dry_run=False, follow_log=False)
+
+                mock_start_background.assert_called_once()
+                command = mock_start_background.call_args.args[0]
+
+                self.assertEqual(command[0:2], ["bash", "-lc"])
+                self.assertIn(
+                    f">> {shlex.quote(str(Path(temp_dir) / 'logs'))}/litellm_",
+                    command[2],
+                )
+                self.assertIn(".log 2>&1", command[2])
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    def test_clean_litellm_logs_removes_managed_files(self, mock_load: Any) -> None:
+        """clean_litellm_logs should remove timestamped logs in managed directory."""
+        import tempfile
+
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs_dir = Path(temp_dir) / "logs"
+            logs_dir.mkdir(parents=True, exist_ok=True)
+
+            first = logs_dir / "litellm_20261018_101010.log"
+            second = logs_dir / "litellm_20261018_101011.log"
+            legacy = Path(temp_dir) / "litellm.log"
+
+            first.write_text("first", encoding="utf-8")
+            second.write_text("second", encoding="utf-8")
+            legacy.write_text("legacy", encoding="utf-8")
+
+            with patch.object(
+                harinezumigel_llm_stack, "INSTALLED_BASE", Path(temp_dir)
+            ):
+                config = AppConfig.from_env()
+                stack = LLMStack(config)
+                stack.clean_litellm_logs(dry_run=False)
+
+                self.assertFalse(first.exists())
+                self.assertFalse(second.exists())
+                self.assertTrue(legacy.exists())
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    @patch("harinezumigel_llm_stack.start_background_process")
+    @patch("harinezumigel_llm_stack.port_in_use")
+    @patch("harinezumigel_llm_stack.run_command")
+    def test_start_litellm_applies_keep_alive_and_debug_settings(
+        self,
+        mock_run: Any,
+        mock_port_in_use: Any,
+        mock_start_background: Any,
+        mock_load: Any,
+    ) -> None:
+        """start_litellm should apply keep_alive and debug settings to the command."""
+        import tempfile
+        import yaml  # type: ignore
+
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
+
+        config_data = {
+            "model_list": [
+                {
+                    "model_name": "model_a",
+                    "litellm_params": {
+                        "model": "openai/model_a",
+                        "api_base": "http://localhost:8001/v1",
+                        "api_key": "sk-test",
+                    },
+                    "model_info": {
+                        "context_length": 4096,
+                        "max_input_tokens": 3000,
+                        "max_output_tokens": 512,
+                        "gpu_memory_utilization": 0.9,
+                    },
+                }
+            ],
+            "litellm_settings": {
+                "keep_alive": 45,
+                "debug": True,
+                "detailed_debug": False,
+            },
+        }
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            yaml.dump(config_data, f)
+            temp_config = f.name
+
+        try:
+            config = replace(AppConfig.from_env(), litellm_config=temp_config)
+            stack = LLMStack(config)
+            stack.load_models()
+
+            mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="")
+            mock_port_in_use.return_value = False
+
+            stack.start_litellm(dry_run=False, follow_log=False)
+
+            mock_start_background.assert_called_once()
+            command = mock_start_background.call_args.args[0][2]
+
+            self.assertIn("export LITELLM_LOG=DEBUG", command)
+            self.assertIn("export AIOHTTP_KEEPALIVE_TIMEOUT=45", command)
+            self.assertIn(" --debug", command)
+        finally:
+            safe_unlink(temp_config)
 
     @patch("harinezumigel_llm_stack.load_env_file")
     def test_top_level_rebuild_false_blocks_recreate_alias(self, mock_load: Any) -> None:
@@ -1407,8 +2360,7 @@ class TestSafetyGuards(unittest.TestCase):
             temp_config = f.name
 
         try:
-            os.environ["LITELLM_CONFIG"] = temp_config
-            config = AppConfig.from_env()
+            config = replace(AppConfig.from_env(), litellm_config=temp_config)
             stack = LLMStack(config)
 
             args = argparse.Namespace(
@@ -1477,8 +2429,7 @@ class TestSafetyGuards(unittest.TestCase):
             temp_config = f.name
 
         try:
-            os.environ["LITELLM_CONFIG"] = temp_config
-            config = AppConfig.from_env()
+            config = replace(AppConfig.from_env(), litellm_config=temp_config)
             stack = LLMStack(config)
 
             args = argparse.Namespace(

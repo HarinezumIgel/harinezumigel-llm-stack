@@ -141,7 +141,6 @@ Create a `.env` file with deployment settings:
 
 ```bash
 # Core paths
-LITELLM_CONFIG=/opt/litellm/config.yaml
 MODEL_ROOT=/opt/models
 
 LITELLM_VENV_ACTIVATE=/opt/litellm/venv/bin/activate
@@ -150,6 +149,8 @@ LITELLM_BIN=/opt/litellm/venv/bin/litellm
 # LiteLLM proxy bind
 LITELLM_BIND_HOST=0.0.0.0
 LITELLM_PORT=4000
+
+# Runtime logs are written to /opt/litellm/logs/litellm_YYYYMMDD_HHMMSS.log
 
 # Shared vLLM host / bind
 VLLM_HOST=localhost
@@ -180,6 +181,12 @@ QWEN3_CODER_NEXT_PORT=8002
 LLAMA_GUARD3_8B_API_BASE=http://${VLLM_HOST}:${LLAMA_GUARD3_8B_PORT}/v1
 QWEN3_CODER_3_NEXT_API_BASE=http://${VLLM_HOST}:${QWEN3_CODER_NEXT_PORT}/v1
 ```
+
+Inline comments separated by whitespace are supported, for example
+`VLLM_HOST=localhost # backend host`. Comments are removed before variable
+expansion, so API URLs retain the configured backend ports. Quote values that
+contain a literal whitespace-separated `#`; embedded hashes such as
+`secret#suffix` are preserved.
 
 ### NVIDIA Driver / vLLM Image Compatibility
 
@@ -214,6 +221,9 @@ harinezumigel-llm-stack <model-or-alias> --start --recreate
 ```
 
 ### 2. LiteLLM Config (`/opt/litellm/config.yaml`)
+
+The launcher derives this path from `INSTALLED_BASE / "config.yaml"`.
+The `LITELLM_CONFIG` environment variable is no longer used.
 
 Define your model deployments:
 
@@ -279,8 +289,10 @@ model_list:
       generation_config: vllm
       enable_auto_tool_choice: true
       tool_call_parser: qwen3_coder
+      reasoning_parser: qwen3
       enable_prefix_caching: true
-      attention_backend: flashinfer
+      attention_config:
+        backend: flashinfer
       enforce_eager: false
       override_generation_config:
         temperature: 0.6
@@ -304,6 +316,9 @@ router_settings:
 litellm_settings:
   drop_params: true
   set_verbose: false
+  keep_alive: 15
+  debug: false
+  detailed_debug: false
   request_timeout: 240
   json_logs: true
   turn_off_message_logging: true
@@ -312,6 +327,8 @@ litellm_settings:
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
 ```
+
+In my experience, `qwen3-coder-30b-a3b-instruct` worked well for coding tasks. Its example configuration is included in [config.yaml.example](config.yaml.example).
 
 ## Usage
 
@@ -393,6 +410,16 @@ harinezumigel-llm-stack litellm --stop
 If another LiteLLM process is already running with the same `--config` path,
 startup exits and asks you to stop the existing instance first.
 
+LiteLLM output is written to timestamped files under `/opt/litellm/logs`,
+for example `/opt/litellm/logs/litellm_20261018_154215.log`.
+All operations abort at script startup with an error if `/opt/litellm` is missing,
+before loading environment settings.
+The `logs` directory is created when needed, except during dry runs or cleanup.
+Cleanup checks that the directory exists and removes only `.log` files inside it,
+leaving the directory and logs elsewhere untouched. Symlinks are not followed.
+The installation base is defined by `INSTALLED_BASE` in the launcher; log paths
+are constructed from it without a legacy log-file setting.
+
 The proxy will be available at `http://localhost:4000` (or your configured port).
 
 **Admin UI**: The `/ui` route is always served by LiteLLM — it cannot be disabled via configuration. API authentication behavior is controlled by your LiteLLM `master_key` configuration. To block the UI, use a reverse proxy (e.g. nginx `location /ui { return 403; }`) or a firewall rule.
@@ -415,11 +442,14 @@ harinezumigel-llm-stack Qwen3-Coder-Next-AWQ --show-log --tail 500
 
 # Show log file path
 harinezumigel-llm-stack llama_guard3_8b --show-log-path
+harinezumigel-llm-stack litellm --show-log-path
 
 # Show all log paths
 harinezumigel-llm-stack all --show-log-path
+harinezumigel-llm-stack all --show-log  # summary paths for vLLM + LiteLLM
 
-# Clean/truncate log files
+# Clean log files
+harinezumigel-llm-stack litellm --clean-log
 harinezumigel-llm-stack all --clean-log
 ```
 
@@ -510,15 +540,47 @@ model_info:
 | `generation_config` | no | Generation config file or `vllm` |
 | `enable_prefix_caching` | no | Enable prefix/prompt caching |
 | `attention_backend` | no | Attention implementation (e.g. `flashinfer`) |
+| `attention_config` | no | Attention config object or JSON string passed to vLLM (`--attention-config`) |
+| `compilation_config` | no | Compilation config object or JSON string passed to vLLM (`--compilation-config`); accepted fields and values depend on the vLLM version |
+| `structured_outputs_config` | no | Structured-output config object or JSON string passed to vLLM (`--structured-outputs-config`), including the `backend` selection (e.g. `xgrammar`) |
 | `enforce_eager` | no | Disable CUDA graphs |
 | `enable_auto_tool_choice` | no | Enable automatic tool/function calling |
+| `reasoning_config` | no | Reasoning config object or JSON string for extra options (`--reasoning-config`), e.g. `reasoning_start_str`, `reasoning_end_str`. A nested `reasoning_parser` is moved to `--reasoning-parser`; conflicting parser values are rejected. |
 | `tool_call_parser` | no | Parser for tool calls (e.g. `qwen3_coder`) |
+| `reasoning_parser` | no | Parser for reasoning traces (e.g. `qwen3`) |
 | `max_num_seqs` | no | Maximum concurrent sequences |
 | `max_num_batched_tokens` | no | Maximum tokens per batch |
 | `license` | no | License identifier or URL |
 | `upstream` | no | Upstream model URL (e.g. HuggingFace page) |
 
 **Sampling parameters** (`override_generation_config`) are request-time parameters in vLLM — not server startup flags. They are passed in API requests and are shown in informational output. Parameters set in `litellm_params` (e.g. `temperature`, `top_p`) are also shown, labeled by source (`model-spec` vs `litellm`).
+
+### Compilation and Structured Outputs
+
+Configure these as sibling fields under a model's `model_info`:
+
+```yaml
+model_info:
+  compilation_config:
+    mode: max-autotune
+  structured_outputs_config:
+    backend: xgrammar
+```
+
+The launcher serializes mappings as JSON and forwards each setting as one vLLM
+CLI argument. JSON strings are also accepted and forwarded unchanged. Omitted
+settings leave the corresponding vLLM defaults in place. Both settings appear
+in `--list`, dynamic help, and the vLLM startup summary.
+
+These values are forwarded without schema validation by the launcher. Check
+your Docker image's vLLM configuration schema before using them; in particular,
+`mode: max-autotune` is not supported by every vLLM version. The example shows
+the requested configuration, not a guarantee of image compatibility.
+
+Existing containers retain their original startup settings. To apply changes,
+set top-level `rebuild: true` on the model entry and use
+`harinezumigel-llm-stack <model-or-alias> --start --recreate`.
+See [config.yaml.example](config.yaml.example) for the complete model example.
 
 ## Model Aliases
 

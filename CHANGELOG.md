@@ -5,14 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [10/20/2026 Revision 65]
 
 ### Added
+- `install.sh`: final red reminder asking whether `<INSTALL_DIR>/.env` has been updated to match the user's LLM setup
+- `harinezumigel-llm-stack.py`: support for `model_info.compilation_config` and `model_info.structured_outputs_config`, forwarded as JSON through `--compilation-config` and `--structured-outputs-config`; both settings appear in model listings, dynamic help, and startup summaries
+- `config.yaml.example` and `README.md`: nested examples for compilation mode and the `xgrammar` structured-output backend, with vLLM version-compatibility guidance in the README
+- Regression coverage for JSON config forwarding, installation-directory startup validation, and LiteLLM log-directory creation and cleanup
 - `harinezumigel-llm-stack.py`: startup NVIDIA compatibility probe before vLLM model launch (`--start` paths), using a lightweight `docker run --gpus all` check
 - `harinezumigel-llm-stack.py`: mismatch parser for NVIDIA runtime error output to report required and detected driver versions when available
 
 ### Changed
+- `harinezumigel-llm-stack.py`: LiteLLM configuration is always read from `INSTALLED_BASE / "config.yaml"`; `LITELLM_CONFIG` is no longer required or used as an environment override
+- `harinezumigel-llm-stack.py`: installation paths now use `INSTALLED_BASE` (`/opt/litellm`); environment-file paths are constructed where needed, while retaining the `HLS_ENV_FILE` override
+- `harinezumigel-llm-stack.py`: all operations abort at script startup if the installation directory is missing, before environment loading
+- LiteLLM logs now use only `/opt/litellm/logs`; the directory is created when needed, except during dry runs and cleanup. Cleanup checks for the directory before removing `.log` files and leaves outside files untouched; symlinks are not followed
 - `install.sh`: LiteLLM setup no longer force-pins `fastapi<0.115.0` and `sse-starlette<2.0.0`; it now relies on `litellm[proxy]` dependency resolution and validates with `pip check`
+- `harinezumigel-llm-stack.py`: deprecated `model_info.enable_reasoning` / `model_info.enable_thinking` startup mapping was replaced with `model_info.reasoning_config` (`--reasoning-config`), and `model_info.attention_config` (`--attention-config`) was added
 - `harinezumigel-llm-stack.py`: startup NVIDIA compatibility probe is warning-only (startup continues) instead of hard-fail
 - `harinezumigel-llm-stack.py`: `--recreate` authorization now reads only top-level `rebuild` per `model_list` entry (no `model_info.rebuild` fallback)
 - `harinezumigel-llm-stack.py`: when top-level `rebuild` is missing, recreate is blocked by default and prints an explicit message requiring `rebuild: true`
@@ -22,8 +31,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `README.md`: API authentication safety wording now clarifies that auth enforcement is controlled by LiteLLM `master_key` configuration
 
 ### Fixed
+- `harinezumigel-llm-stack.py`: strip whitespace-separated inline comments from `.env` values before variable expansion, preserving quoted and embedded `#` characters; this prevents false host mismatch warnings and API URLs losing their configured backend ports and falling back to port 80
+- `harinezumigel-llm-stack.py`: report invalid bind hosts, permission failures, and other bind errors explicitly instead of incorrectly reporting that the port is already in use
 - `install.sh`: avoided circular MCP conflict guidance where recreating the venv could reproduce the same incompatibility introduced by forced dependency pinning
 - `harinezumigel-llm-stack.py`: reduced startup warning noise in recent vLLM images by removing `VLLM_LOG_LEVEL` injection and unsetting image-level `VLLM_VERSION`, `VLLM_FLASH_ATTN_SRC_DIR`, and `VLLM_LOG_LEVEL` before launching the API server
+
+### Removed
+- `BOOTSTRAP_ENV_FILE` and the unused `litellm_log_file` configuration field
+- Legacy `LITELLM_LOG_FILE` configuration and fallback log-file handling; existing log files outside `/opt/litellm/logs` are no longer read or cleaned
 
 ## [1.2.0] - 2026-08-05
 

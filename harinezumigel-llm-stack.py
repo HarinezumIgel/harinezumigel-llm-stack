@@ -11,7 +11,7 @@ DISCLAIMER: This project is not affiliated with LLMStack (llmstack.ai / Promptly
 
 The script reads configuration from two sources:
 - Deployment settings: /opt/litellm/.env (or HLS_ENV_FILE)
-- Model runtime settings: /opt/litellm/config.yaml (LITELLM_CONFIG)
+- Model runtime settings: config.yaml under INSTALLED_BASE (/opt/litellm)
 
 It manages:
 1. LiteLLM proxy server (native Python process)
@@ -72,11 +72,13 @@ It manages:
 
     # Show log file paths
     harinezumigel-llm-stack qwen-coder --show-log-path
+    harinezumigel-llm-stack litellm --show-log-path
     harinezumigel-llm-stack all --show-log-path
-    harinezumigel-llm-stack all --show-log  # shows paths for 'all'
+    harinezumigel-llm-stack all --show-log  # shows vLLM + LiteLLM log paths
 
     # Clean log files (truncate to free space)
     harinezumigel-llm-stack qwen-coder --clean-log
+    harinezumigel-llm-stack litellm --clean-log
     harinezumigel-llm-stack all --clean-log
 
     # Check container status (works with alias)
@@ -101,9 +103,11 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import errno
 import json
 import os
 import re
+import shlex
 import socket
 import subprocess
 import sys
@@ -115,14 +119,22 @@ from urllib.parse import ParseResult, urlparse
 
 import yaml
 
-__version__ = "1.3.0/19 10/01/2026"
+__version__ = "1.4.0/63 10/19/2026"
 
 _RED = "\033[31m"
 _RESET = "\033[0m"
+LITELLM_TARGETS = ("litellm", "llm-lite", "lite-llm")
+VLLM_CONTAINER_PREFIX = "vllm-"
+DOCKER_LOG_ROOT = Path("/var/lib/docker")
+INSTALLED_BASE = Path("/opt/litellm")
 
+if not INSTALLED_BASE.is_absolute():
+    print(f"ERROR: INSTALLED_BASE must be an absolute path: {INSTALLED_BASE}")
+    sys.exit(1)
 
-# Default environment file path (can be overridden via HLS_ENV_FILE)
-BOOTSTRAP_ENV_FILE = os.environ.get("HLS_ENV_FILE", "/opt/litellm/.env")
+if not INSTALLED_BASE.is_dir():
+    print(f"ERROR: LiteLLM deployment directory does not exist: {INSTALLED_BASE}")
+    sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +142,27 @@ BOOTSTRAP_ENV_FILE = os.environ.get("HLS_ENV_FILE", "/opt/litellm/.env")
 # ---------------------------------------------------------------------------
 # These functions safely load and parse environment variables from .env files
 # and provide type-safe access with validation.
+
+
+def _strip_env_comment(value: str) -> str:
+    """Remove whitespace-separated comments outside quoted env values."""
+    quote: str | None = None
+    escaped = False
+
+    for index, char in enumerate(value):
+        if escaped:
+            escaped = False
+        elif char == "\\" and quote != "'":
+            escaped = True
+        elif quote is not None:
+            if char == quote:
+                quote = None
+        elif char in ("'", '"'):
+            quote = char
+        elif char == "#" and (index == 0 or value[index - 1].isspace()):
+            return value[:index].rstrip()
+
+    return value
 
 
 def load_env_file(path: str) -> None:
@@ -140,6 +173,7 @@ def load_env_file(path: str) -> None:
       export KEY=value
       KEY=${OTHER_KEY}
       KEY=$OTHER_KEY
+      KEY=value # inline comment (outside quotes)
 
     Values from the env file override already-set process variables. This keeps
     /opt/litellm/.env authoritative for this launcher.
@@ -169,7 +203,9 @@ def load_env_file(path: str) -> None:
 
             key, value = line.split("=", 1)
             key = key.strip()
-            value = value.strip().strip('"').strip("'")
+            value = _strip_env_comment(value.strip()).strip()
+            if len(value) >= 2 and value[0] in ("'", '"') and value[-1] == value[0]:
+                value = value[1:-1]
 
             # Build environment for variable expansion (current env + newly loaded)
             expansion_env = dict(os.environ)
@@ -223,7 +259,7 @@ def env_int(name: str, default: str | None = None, *, required: bool = False) ->
 
 
 # Load environment variables early (before AppConfig initialization)
-load_env_file(BOOTSTRAP_ENV_FILE)
+load_env_file(os.environ.get("HLS_ENV_FILE", str(INSTALLED_BASE / ".env")))
 
 
 @dataclass(frozen=True)
@@ -255,8 +291,8 @@ class AppConfig:  # pylint: disable=too-many-instance-attributes
     def from_env(cls) -> "AppConfig":
         """Build AppConfig from environment variables."""
         return cls(
-            env_file=BOOTSTRAP_ENV_FILE,
-            litellm_config=env_string("LITELLM_CONFIG", required=True),
+            env_file=os.environ.get("HLS_ENV_FILE", str(INSTALLED_BASE / ".env")),
+            litellm_config=str(INSTALLED_BASE / "config.yaml"),
             model_root=env_string("MODEL_ROOT", required=True),
             litellm_venv_activate=env_string("LITELLM_VENV_ACTIVATE", required=True),
             litellm_bin=env_string("LITELLM_BIN", required=True),
@@ -439,18 +475,21 @@ def extract_nvidia_driver_mismatch(message: str) -> tuple[str, str] | None:
 
 
 def port_in_use(port: int, host: str) -> bool:
-    """Return True if host:port cannot be bound.
+    """Return True if host:port is already in use.
 
     Attempts to bind to the port to check availability.
-    This is a local system check (not Docker-specific).
+    Other bind errors are reported explicitly and stop the launcher.
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
     try:
         sock.bind((host, port))
         return False
-    except OSError:
-        return True
+    except OSError as exc:
+        if exc.errno == errno.EADDRINUSE:
+            return True
+        print(f"ERROR: Could not check port {port} on {host}: {exc}")
+        sys.exit(1)
     finally:
         sock.close()
 
@@ -484,7 +523,60 @@ def start_background_process(command: list[str]) -> None:
     subprocess.Popen(command)
 
 
-def _format_log_line(line: str) -> str:
+def _format_human_log_line(obj_dict: dict[str, Any]) -> str:
+    """Render a JSON log object in a compact human-readable form."""
+    timestamp = str(obj_dict.get("timestamp", "-"))
+    level = str(obj_dict.get("level", "LOG")).upper()
+    component = str(obj_dict.get("component", "-"))
+    logger = str(obj_dict.get("logger", "-"))
+    message = str(obj_dict.get("message", "")).strip()
+
+    lines = [f"[{timestamp}] {level:<7} {component} ({logger})"]
+
+    if message:
+        lines.append(message)
+
+    known_keys = {
+        "timestamp",
+        "level",
+        "component",
+        "logger",
+        "message",
+        "stacktrace",
+    }
+    extra_keys = [key for key in obj_dict if key not in known_keys]
+
+    if extra_keys:
+        shown_parts: list[str] = []
+
+        for key in extra_keys[:5]:
+            value = obj_dict.get(key)
+            if isinstance(value, (dict, list)):
+                rendered = json.dumps(value, ensure_ascii=False)
+            else:
+                rendered = str(value)
+
+            rendered = rendered.replace("\n", "\\n")
+            if len(rendered) > 100:
+                rendered = rendered[:97] + "..."
+
+            shown_parts.append(f"{key}={rendered}")
+
+        lines.append("  " + " | ".join(shown_parts))
+
+        remaining = len(extra_keys) - 5
+        if remaining > 0:
+            lines.append(f"  ... +{remaining} more fields")
+
+    stacktrace = obj_dict.get("stacktrace")
+    if stacktrace:
+        lines.append("stacktrace:")
+        lines.append(str(stacktrace))
+
+    return "\n".join(lines)
+
+
+def _format_log_line(line: str, *, pretty_debug: bool = False) -> str:
     """Expand escaped newlines in a JSON log line's stacktrace field.
 
     LiteLLM json_logs mode serialises multi-line stack traces as a single JSON
@@ -496,6 +588,10 @@ def _format_log_line(line: str) -> str:
         if not isinstance(obj, dict):
             return line
         obj_dict = cast(dict[str, Any], obj)
+
+        if pretty_debug:
+            return _format_human_log_line(obj_dict)
+
         stacktrace = obj_dict.get("stacktrace")
         if stacktrace:
             without_trace = {k: v for k, v in obj_dict.items() if k != "stacktrace"}
@@ -505,7 +601,7 @@ def _format_log_line(line: str) -> str:
         return line
 
 
-def _stream_formatted_logs(command: list[str]) -> int:
+def _stream_formatted_logs(command: list[str], *, pretty_debug: bool = False) -> int:
     """Run *command* and stream its merged stdout/stderr with log formatting."""
     with subprocess.Popen(
         command,
@@ -515,7 +611,10 @@ def _stream_formatted_logs(command: list[str]) -> int:
     ) as proc:
         assert proc.stdout is not None
         for raw in proc.stdout:
-            print(_format_log_line(raw.rstrip("\n")), flush=True)
+            print(
+                _format_log_line(raw.rstrip("\n"), pretty_debug=pretty_debug),
+                flush=True,
+            )
         proc.wait()
     return proc.returncode
 
@@ -635,6 +734,9 @@ class LLMStack:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
         self.models: dict[str, ModelDeployment] = {}
+        self.litellm_keep_alive: float | None = None
+        self.litellm_debug: bool = False
+        self.litellm_detailed_debug: bool = False
 
     # ------------------------------------------------------------------
     # Configuration loading
@@ -656,6 +758,64 @@ class LLMStack:
 
         return host, port
 
+    def _load_litellm_runtime_settings(self, cfg: dict[str, Any]) -> None:
+        """Load LiteLLM startup settings from top-level litellm_settings."""
+        raw_settings: Any = cfg.get("litellm_settings")
+
+        if raw_settings is None:
+            raw_settings = {}
+
+        if not isinstance(raw_settings, dict):
+            print("ERROR: litellm_settings must be a key/value mapping")
+            sys.exit(1)
+
+        settings = cast(dict[str, Any], raw_settings)
+        raw_keep_alive = settings.get("keep_alive")
+        keep_alive = as_float(raw_keep_alive, None)
+
+        if raw_keep_alive is not None and keep_alive is None:
+            print("ERROR: litellm_settings.keep_alive must be numeric (seconds)")
+            sys.exit(1)
+
+        if keep_alive is not None and keep_alive <= 0:
+            print("ERROR: litellm_settings.keep_alive must be greater than 0")
+            sys.exit(1)
+
+        self.litellm_keep_alive = keep_alive
+        self.litellm_detailed_debug = as_bool(settings.get("detailed_debug"), False)
+        self.litellm_debug = as_bool(
+            settings.get("debug"),
+            as_bool(settings.get("set_verbose"), False),
+        )
+
+    def _load_litellm_runtime_settings_from_file(self) -> None:
+        """Best-effort reload of LiteLLM runtime settings from config file."""
+        config_path = Path(self.config.litellm_config)
+
+        if not config_path.exists():
+            return
+
+        try:
+            with config_path.open("r", encoding="utf-8") as fh:
+                cfg: Any = yaml.safe_load(fh) or {}
+        except (OSError, yaml.YAMLError):
+            return
+
+        if not isinstance(cfg, dict):
+            return
+
+        cfg_dict = cast(dict[str, Any], cfg)
+        raw_settings = cfg_dict.get("litellm_settings")
+        if not isinstance(raw_settings, dict):
+            return
+
+        settings = cast(dict[str, Any], raw_settings)
+        self.litellm_detailed_debug = as_bool(settings.get("detailed_debug"), False)
+        self.litellm_debug = as_bool(
+            settings.get("debug"),
+            as_bool(settings.get("set_verbose"), False),
+        )
+
     def load_models(self) -> None:
         """Load model deployments from config.yaml into self.models.
 
@@ -674,6 +834,8 @@ class LLMStack:
 
         with config_path.open("r", encoding="utf-8") as fh:
             cfg: dict[str, Any] = yaml.safe_load(fh) or {}
+
+        self._load_litellm_runtime_settings(cfg)
 
         deployments: dict[str, ModelDeployment] = {}
 
@@ -852,6 +1014,48 @@ class LLMStack:
 
         return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
+    def _is_managed_vllm_container_name(self, name: str) -> bool:
+        """Return True only for container names managed by this tool."""
+        return bool(name) and name.startswith(VLLM_CONTAINER_PREFIX)
+
+    def _is_safe_path_under_root(self, path: Path, *, allowed_root: Path) -> bool:
+        """Return True only for absolute paths under an allowed root.
+
+        This check is lexical only (no stat/resolve calls) so it remains safe on
+        root-owned paths such as /var/lib/docker where permission to traverse may
+        be restricted for non-root users.
+        """
+        if not path.is_absolute():
+            return False
+
+        normalized_allowed_root = Path(os.path.normpath(str(allowed_root)))
+        normalized_path = Path(os.path.normpath(str(path)))
+
+        try:
+            normalized_path.relative_to(normalized_allowed_root)
+            return True
+        except ValueError:
+            return False
+
+    def _is_safe_log_path(self, log_path: Path, *, allowed_root: Path) -> bool:
+        """Return True only for absolute .log paths under an allowed root.
+
+        This check is lexical only (no stat/resolve calls) so it remains safe on
+        root-owned paths such as /var/lib/docker where permission to traverse may
+        be restricted for non-root users.
+        """
+        if not self._is_safe_path_under_root(log_path, allowed_root=allowed_root):
+            return False
+
+        if log_path.suffix != ".log":
+            return False
+
+        return True
+
+    def _is_safe_docker_log_path(self, log_path: str) -> bool:
+        """Return True only for Docker-managed json-file log paths."""
+        return self._is_safe_log_path(Path(log_path), allowed_root=DOCKER_LOG_ROOT)
+
     def _docker_start_container(self, name: str, *, dry_run: bool = False) -> None:
         """Start an existing Docker container."""
         print(f"Starting existing Docker container: {name}")
@@ -896,6 +1100,11 @@ class LLMStack:
 
         Safety: containers must be stopped before calling this. Respects dry_run flag.
         """
+        if not self._is_managed_vllm_container_name(name):
+            print(f"ERROR: Refusing to remove unmanaged container: {name}")
+            print(f"Allowed prefix: {VLLM_CONTAINER_PREFIX}")
+            sys.exit(1)
+
         command = ["docker", "rm", name]
 
         print(f"Removing Docker container: {name}")
@@ -1005,12 +1214,12 @@ class LLMStack:
 
     def _find_all_vllm_containers(self, model_name: str) -> list[str]:
         """Find all vLLM container names for a model (running and stopped)."""
-        prefix = f"vllm-{docker_safe_name(model_name)}-"
+        prefix = f"{VLLM_CONTAINER_PREFIX}{docker_safe_name(model_name)}-"
         return [n for n in self._docker_list_container_names(all_containers=True) if n.startswith(prefix)]
 
     def _find_running_vllm_containers(self, model_name: str) -> list[str]:
         """Find running vLLM container names for a model."""
-        prefix = f"vllm-{docker_safe_name(model_name)}-"
+        prefix = f"{VLLM_CONTAINER_PREFIX}{docker_safe_name(model_name)}-"
         return [n for n in self._docker_list_container_names(all_containers=False) if n.startswith(prefix)]
 
     # ------------------------------------------------------------------
@@ -1097,10 +1306,16 @@ class LLMStack:
             "max_num_batched_tokens",
             "max_num_seqs",
             "attention_backend",
+            "attention_config",
+            "compilation_config",
+            "structured_outputs_config",
             "enable_prefix_caching",
             "enforce_eager",
             "enable_auto_tool_choice",
+            "reasoning_config",
             "tool_call_parser",
+            "reasoning_parser",
+            "speculative_config",
             "trust_remote_code",
         ]
 
@@ -1159,8 +1374,11 @@ class LLMStack:
         keys = [
             "model_dir", "ipc", "quantization", "kv_cache_dtype", "generation_config",
             "override_generation_config", "max_num_batched_tokens", "max_num_seqs",
-            "attention_backend", "enable_prefix_caching", "enforce_eager",
-            "enable_auto_tool_choice", "tool_call_parser", "license", "upstream",
+            "attention_backend", "attention_config", "enable_prefix_caching", "enforce_eager",
+            "compilation_config", "structured_outputs_config",
+            "reasoning_config",
+            "enable_auto_tool_choice", "tool_call_parser", "reasoning_parser",
+            "speculative_config", "license", "upstream",
         ]
 
         model_lines: list[str] = []
@@ -1235,15 +1453,17 @@ Examples:
   Show log paths:
   ---------------
 
-  harinezumigel-llm-stack mistral_7b --show-log-path        # show Docker log file path
-  harinezumigel-llm-stack all --show-log-path               # show log paths for all models
-  harinezumigel-llm-stack all --show-log                    # shows paths for all models
+    harinezumigel-llm-stack mistral_7b --show-log-path        # show Docker log file path
+    harinezumigel-llm-stack litellm --show-log-path           # show LiteLLM log directory + latest log
+    harinezumigel-llm-stack all --show-log-path               # show vLLM + LiteLLM log paths
+    harinezumigel-llm-stack all --show-log                    # shows paths for all logs
 
   Clean logs:
   -----------
 
-  harinezumigel-llm-stack mistral_7b --clean-log            # truncate log file for one model
-  harinezumigel-llm-stack all --clean-log                   # truncate log files for all models
+    harinezumigel-llm-stack mistral_7b --clean-log            # truncate log file for one model
+    harinezumigel-llm-stack litellm --clean-log               # remove LiteLLM timestamped logs
+    harinezumigel-llm-stack all --clean-log                   # truncate vLLM + clean LiteLLM logs
   Stop models:
   ------------
 
@@ -1260,6 +1480,9 @@ Examples:
   --------------
 
   harinezumigel-llm-stack litellm --start
+    harinezumigel-llm-stack litellm --show-log
+    harinezumigel-llm-stack litellm --show-log-path
+    harinezumigel-llm-stack litellm --clean-log
   harinezumigel-llm-stack litellm --stop
 
 Current model values from LiteLLM config:
@@ -1308,6 +1531,199 @@ Current model values from LiteLLM config:
         if returncode != 0:
             print(f"ERROR: Failed to read logs for container: {container_name}")
             sys.exit(returncode)
+
+    def _litellm_logs_dir(self, *, create: bool = True) -> Path:
+        """Use only the logs directory under the existing LiteLLM deployment."""
+        logs_dir = INSTALLED_BASE / "logs"
+        if logs_dir.is_symlink():
+            print(f"ERROR: LiteLLM logs directory must not be a symlink: {logs_dir}")
+            sys.exit(1)
+
+        if create:
+            try:
+                logs_dir.mkdir(exist_ok=True)
+            except OSError as exc:
+                print(f"ERROR: Failed to create LiteLLM log directory: {logs_dir}")
+                print(str(exc))
+                sys.exit(1)
+
+        return logs_dir
+
+    def _litellm_log_path(self) -> Path | None:
+        """Return the latest managed LiteLLM log path, if present."""
+        logs_dir = self._litellm_logs_dir()
+
+        if logs_dir.exists() and logs_dir.is_dir():
+            paths = sorted(
+                path
+                for path in logs_dir.glob("litellm_*.log")
+                if path.is_file() and not path.is_symlink()
+            )
+            if paths:
+                return paths[-1]
+
+        return None
+
+    def _new_litellm_log_path(self, *, create: bool = True) -> Path:
+        """Return the next timestamped LiteLLM log file path."""
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        return self._litellm_logs_dir(create=create) / f"litellm_{stamp}.log"
+
+    def _is_safe_litellm_log_path(self, log_path: Path) -> bool:
+        """Return True only for safe LiteLLM log paths.
+
+        Safety policy:
+            - Must be an absolute path
+            - Must end with .log
+            - Must stay under /opt/litellm/logs
+        """
+        return self._is_safe_log_path(log_path, allowed_root=INSTALLED_BASE / "logs")
+
+    def _is_safe_litellm_logs_dir(self, logs_dir: Path) -> bool:
+        """Return True only for safe LiteLLM logs directories."""
+        return logs_dir == INSTALLED_BASE / "logs" and not logs_dir.is_symlink()
+
+    def _tail_file_logs(
+        self,
+        log_path: Path,
+        *,
+        tail: str,
+        follow: bool,
+        pretty_debug: bool = False,
+    ) -> int:
+        """Tail a local log file and stream output through the formatter."""
+        if tail.lower() == "all":
+            command = ["tail", "-n", "+1"]
+        else:
+            command = ["tail", "-n", str(tail)]
+
+        if follow:
+            command.append("-f")
+
+        command.append(str(log_path))
+        return _stream_formatted_logs(command, pretty_debug=pretty_debug)
+
+    def show_litellm_logs(
+        self,
+        *,
+        tail: str,
+        follow: bool,
+        show_log_path: bool,
+    ) -> None:
+        """Show logs for the host-process LiteLLM instance."""
+        self._load_litellm_runtime_settings_from_file()
+        pretty_debug = self.litellm_debug or self.litellm_detailed_debug
+
+        logs_dir = self._litellm_logs_dir()
+        log_path = self._litellm_log_path()
+        state = "running" if self._find_litellm_pids() else "stopped"
+
+        print()
+        print("=== LiteLLM logs ===")
+        print(f"Process:   {state}")
+        print(f"Logs dir:  {logs_dir}")
+
+        if show_log_path:
+            print(f"Log path:  {log_path or '(none)'}")
+
+        print()
+
+        if log_path is None:
+            print(f"No LiteLLM log file found in {logs_dir}")
+            return
+
+        returncode = self._tail_file_logs(
+            log_path,
+            tail=tail,
+            follow=follow,
+            pretty_debug=pretty_debug,
+        )
+
+        if returncode != 0:
+            print(f"ERROR: Failed to read LiteLLM log file: {log_path}")
+            sys.exit(returncode)
+
+    def show_litellm_log_path(self) -> None:
+        """Show LiteLLM logs directory and latest log file path."""
+        logs_dir = self._litellm_logs_dir()
+        log_path = self._litellm_log_path()
+        state = "running" if self._find_litellm_pids() else "stopped"
+
+        print()
+        print("=== LiteLLM log path ===")
+        print("litellm")
+        print(f"  state:    {state}")
+        print(f"  logs_dir: {logs_dir}")
+        print(f"  log_path: {log_path or '(none)'}")
+        print(f"  exists:   {'yes' if log_path is not None and log_path.exists() else 'no'}")
+        print()
+
+    def clean_litellm_logs(self, *, dry_run: bool = False) -> None:
+        """Clean/remove managed LiteLLM log files."""
+        logs_dir = self._litellm_logs_dir(create=False)
+
+        print()
+        print("=== Cleaning LiteLLM logs ===")
+        print("litellm")
+        print(f"  Logs dir: {logs_dir}")
+
+        if not logs_dir.is_dir():
+            print("  Status:   Skipped - logs directory does not exist")
+            print()
+            return
+
+        if not self._is_safe_litellm_logs_dir(logs_dir):
+            print(f"  Status:   ✗ Skipped — unexpected logs directory: {logs_dir}")
+            print(f"            Allowed root: {INSTALLED_BASE / 'logs'}")
+            print()
+            return
+
+        safe_paths = [
+            path
+            for path in sorted(logs_dir.glob("*.log"))
+            if path.is_file()
+            and not path.is_symlink()
+            and self._is_safe_litellm_log_path(path)
+        ]
+
+        if dry_run:
+            print(f"  Action:   Would remove {len(safe_paths)} file(s) (dry run)")
+            print()
+            return
+
+        if not safe_paths:
+            print("  Status:   ✗ Skipped — no managed LiteLLM log files found")
+            print()
+            return
+
+        removed = 0
+        failures: list[str] = []
+
+        for path in safe_paths:
+            try:
+                path.unlink()
+                removed += 1
+            except OSError as exc:
+                failures.append(f"{path}: {exc}")
+
+        if failures:
+            print(f"  Status:   ✗ Removed {removed}, failed {len(failures)}")
+            for failure in failures:
+                print(f"            {failure}")
+        else:
+            print(f"  Status:   ✓ Removed {removed} file(s)")
+
+        print()
+
+    def show_all_log_paths(self) -> None:
+        """Show log paths for all vLLM containers and LiteLLM."""
+        self.show_vllm_log_paths("all")
+        self.show_litellm_log_path()
+
+    def clean_all_logs(self, *, dry_run: bool = False) -> None:
+        """Clean/truncate all vLLM logs and remove LiteLLM managed logs."""
+        self.clean_vllm_logs("all", dry_run=dry_run)
+        self.clean_litellm_logs(dry_run=dry_run)
 
     def show_vllm_logs(
         self,
@@ -1436,12 +1852,9 @@ Current model values from LiteLLM config:
                 print("  Action:   Would truncate (dry run)")
             else:
                 # Validate path is a Docker-managed log file before running sudo truncate
-                if not (log_path.startswith("/var/lib/docker/") and log_path.endswith(".log")):
+                if not self._is_safe_docker_log_path(log_path):
                     print(f"  Status:   ✗ Skipped — unexpected log path: {log_path}")
-                    continue
-
-                if not Path(log_path).exists():
-                    print(f"  Status:   ✗ Skipped — log file not found: {log_path}")
+                    print(f"            Allowed root: {DOCKER_LOG_ROOT}")
                     continue
 
                 result = run_command(["sudo", "truncate", "-s", "0", log_path], capture=True)
@@ -1536,6 +1949,20 @@ Current model values from LiteLLM config:
         if raw_info.get("attention_backend"):
             command.extend(["--attention-backend", str(raw_info["attention_backend"])])
 
+        attention_config = raw_info.get("attention_config")
+
+        if attention_config:
+            if not isinstance(attention_config, str):
+                attention_config = json.dumps(attention_config, separators=(",", ":"))
+            command.extend(["--attention-config", attention_config])
+
+        for config_key in ("compilation_config", "structured_outputs_config"):
+            config_value = raw_info.get(config_key)
+            if config_value:
+                if not isinstance(config_value, str):
+                    config_value = json.dumps(config_value, separators=(",", ":"))
+                command.extend([f"--{config_key.replace('_', '-')}", config_value])
+
         if raw_info.get("generation_config"):
             command.extend(["--generation-config", str(raw_info["generation_config"])])
 
@@ -1553,8 +1980,69 @@ Current model values from LiteLLM config:
         if as_bool(raw_info.get("enable_auto_tool_choice", False)):
             command.append("--enable-auto-tool-choice")
 
+        reasoning_config_value = raw_info.get("reasoning_config")
+        reasoning_parser = raw_info.get("reasoning_parser")
+        reasoning_config_arg = ""
+
+        if isinstance(reasoning_config_value, str):
+            try:
+                reasoning_config_value = json.loads(reasoning_config_value)
+            except json.JSONDecodeError:
+                print("ERROR: model_info.reasoning_config must be valid JSON.")
+                sys.exit(1)
+
+        if isinstance(reasoning_config_value, dict):
+            normalized_reasoning_config: dict[str, Any] = dict(
+                cast(dict[str, Any], reasoning_config_value)
+            )
+
+            if (
+                "enable_reasoning" in normalized_reasoning_config
+                or "enable_thinking" in normalized_reasoning_config
+            ):
+                print(
+                    "ERROR: model_info.reasoning_config no longer accepts "
+                    "enable_reasoning/enable_thinking. "
+                    "Use reasoning_parser, reasoning_start_str, and/or reasoning_end_str."
+                )
+                sys.exit(1)
+
+            nested_parser = normalized_reasoning_config.pop("reasoning_parser", None)
+            if reasoning_parser and nested_parser and reasoning_parser != nested_parser:
+                print(
+                    "ERROR: model_info.reasoning_parser conflicts with "
+                    "model_info.reasoning_config.reasoning_parser."
+                )
+                sys.exit(1)
+            reasoning_parser = reasoning_parser or nested_parser
+
+            if normalized_reasoning_config:
+                reasoning_config_arg = json.dumps(
+                    normalized_reasoning_config,
+                    separators=(",", ":"),
+                )
+        elif reasoning_config_value is not None:
+            print(
+                "ERROR: model_info.reasoning_config must be an object or JSON string, "
+                "containing an object."
+            )
+            sys.exit(1)
+
+        if reasoning_config_arg:
+            command.extend(["--reasoning-config", reasoning_config_arg])
+
         if raw_info.get("tool_call_parser"):
             command.extend(["--tool-call-parser", str(raw_info["tool_call_parser"])])
+
+        if reasoning_parser:
+            command.extend(["--reasoning-parser", str(reasoning_parser)])
+
+        speculative_config = raw_info.get("speculative_config")
+
+        if speculative_config:
+            if not isinstance(speculative_config, str):
+                speculative_config = json.dumps(speculative_config, separators=(",", ":"))
+            command.extend(["--speculative-config", speculative_config])
 
         api_key = model.api_key or os.environ.get("LOCAL_VLLM_API_KEY", "")
 
@@ -1601,6 +2089,9 @@ Current model values from LiteLLM config:
         print(f"Trust remote code:         {as_bool(raw_info.get('trust_remote_code', False))}")
         print(f"Enable prefix caching:     {as_bool(raw_info.get('enable_prefix_caching', False))}")
         print(f"Attention backend:         {raw_info.get('attention_backend', '(default)')}")
+        print(f"Attention config:          {raw_info.get('attention_config', '(none)')}")
+        print(f"Compilation config:        {raw_info.get('compilation_config', '(none)')}")
+        print(f"Structured outputs config: {raw_info.get('structured_outputs_config', '(none)')}")
         print(f"Generation config:         {raw_info.get('generation_config', '(model default)')}")
 
         # Show sampling parameters
@@ -1612,7 +2103,10 @@ Current model values from LiteLLM config:
             print(f"Sampling parameters:       {', '.join(sampling_info)}")
 
         print(f"Auto tool choice:          {as_bool(raw_info.get('enable_auto_tool_choice', False))}")
+        print(f"Reasoning config:          {raw_info.get('reasoning_config', '(none)')}")
         print(f"Tool call parser:          {raw_info.get('tool_call_parser', '(none)')}")
+        print(f"Reasoning parser:          {raw_info.get('reasoning_parser', '(none)')}")
+        print(f"Speculative config:        {raw_info.get('speculative_config', '(none)')}")
         print(f"Quantization:              {raw_info.get('quantization', '(none)')}")
         print(f"KV cache dtype:            {raw_info.get('kv_cache_dtype', '(auto)')}")
         print()
@@ -1837,25 +2331,44 @@ Current model values from LiteLLM config:
             )
             return
 
+        log_level = "DEBUG" if (self.litellm_debug or self.litellm_detailed_debug) else "INFO"
+        keep_alive_export = (
+            f"export AIOHTTP_KEEPALIVE_TIMEOUT={self.litellm_keep_alive:g} && "
+            if self.litellm_keep_alive is not None
+            else ""
+        )
+        debug_flag = (
+            " --detailed_debug"
+            if self.litellm_detailed_debug
+            else (" --debug" if self.litellm_debug else "")
+        )
+
         command = (
             f"set -a && "
             f"source {self.config.env_file} && "
             f"set +a && "
-            f"export LITELLM_LOG=INFO && "
+            f"export LITELLM_LOG={log_level} && "
+            f"{keep_alive_export}"
             f"source {self.config.litellm_venv_activate} && "
             # litellm CLI does bare `from proxy_server import` which only works when
             # the proxy package directory is on PYTHONPATH
             f"export PYTHONPATH=\"$(python -c 'import litellm,os;print(os.path.dirname(litellm.__file__)+\"/proxy\")')\" && "
             f"{self.config.litellm_bin} --config {self.config.litellm_config} "
             f"--host {self.config.litellm_bind_host} "
-            f"--port {self.config.litellm_port}"
+            f"--port {self.config.litellm_port}{debug_flag}"
         )
+        log_path = self._new_litellm_log_path(create=not dry_run)
+
+        quoted_log_path = shlex.quote(str(log_path))
+        detached_command = f"{command} >> {quoted_log_path} 2>&1"
+        streaming_command = f"{command} 2>&1 | tee -a {quoted_log_path}"
 
         print(
             f"\n=== Starting LiteLLM router on "
             f"{self.config.litellm_bind_host}:{self.config.litellm_port} ==="
         )
         print(f"Config: {self.config.litellm_config}")
+        print(f"Log file: {log_path}")
         print()
 
         # Display configured models with their sampling parameters
@@ -1875,35 +2388,96 @@ Current model values from LiteLLM config:
 
         if not dry_run:
             if follow_log:
-                _stream_formatted_logs(["bash", "-lc", command])
+                _stream_formatted_logs(
+                    ["bash", "-lc", streaming_command],
+                    pretty_debug=self.litellm_debug or self.litellm_detailed_debug,
+                )
             else:
-                start_background_process(["bash", "-lc", command])
+                start_background_process(["bash", "-lc", detached_command])
 
     def _find_litellm_pids(self) -> list[str]:
         """Find LiteLLM process IDs.
 
-        Matches only processes for this LITELLM_CONFIG.
+        Matches only real LiteLLM CLI processes for this LITELLM_CONFIG.
+
+        Uses ``pgrep -fa`` so we can inspect the full argv for each candidate.
+        This avoids false positives from wrapper tools (for example log viewers
+        or shell commands) that merely contain "litellm" in their command line.
         """
-        patterns = [
-            f"{self.config.litellm_bin} --config {self.config.litellm_config}",
-            f"litellm --config {self.config.litellm_config}",
-        ]
-
         pids: list[str] = []
+        target_config = os.path.normpath(self.config.litellm_config)
+        configured_bin = os.path.normpath(self.config.litellm_bin)
+        result = run_command(["pgrep", "-fa", "litellm"], capture=True)
 
-        for pattern in patterns:
-            result = run_command(["pgrep", "-f", pattern], capture=True)
+        if result.returncode not in (0, 1):
+            print("ERROR: Failed to query LiteLLM processes")
+            print(result.stderr.strip())
+            sys.exit(1)
 
-            if result.returncode in (0, 1):
-                for line in result.stdout.splitlines():
-                    candidate = line.strip()
+        def _extract_config(argv: list[str]) -> str | None:
+            """Return the --config value from argv, if present."""
+            for index, token in enumerate(argv):
+                if token == "--config" and index + 1 < len(argv):
+                    return argv[index + 1]
+                if token.startswith("--config="):
+                    return token.split("=", 1)[1]
+            return None
 
-                    if candidate and candidate.isdigit():
-                        pids.append(candidate)
-            else:
-                print("ERROR: Failed to query LiteLLM processes")
-                print(result.stderr.strip())
-                sys.exit(1)
+        def _is_litellm_argv(argv: list[str]) -> bool:
+            """Return True only for direct LiteLLM CLI process argv forms."""
+            if not argv:
+                return False
+
+            executable = Path(argv[0]).name
+
+            if executable == "litellm":
+                return True
+
+            if os.path.normpath(argv[0]) == configured_bin:
+                return True
+
+            if executable.startswith("python"):
+                if len(argv) > 1 and os.path.normpath(argv[1]) == configured_bin:
+                    return True
+                if len(argv) > 1 and Path(argv[1]).name == "litellm":
+                    return True
+
+                for index, token in enumerate(argv):
+                    if token == "-m" and index + 1 < len(argv):
+                        module_name = argv[index + 1]
+                        if module_name == "litellm" or module_name.startswith("litellm."):
+                            return True
+
+            return False
+
+        for line in result.stdout.splitlines():
+            pid_and_cmd = line.strip().split(maxsplit=1)
+
+            if len(pid_and_cmd) != 2:
+                continue
+
+            pid = pid_and_cmd[0]
+
+            if not pid.isdigit():
+                continue
+
+            try:
+                argv = shlex.split(pid_and_cmd[1])
+            except ValueError:
+                continue
+
+            if not _is_litellm_argv(argv):
+                continue
+
+            config_value = _extract_config(argv)
+
+            if config_value is None:
+                continue
+
+            if os.path.normpath(config_value) != target_config:
+                continue
+
+            pids.append(pid)
 
         return sorted(set(pids))
 
@@ -2044,15 +2618,32 @@ Current model values from LiteLLM config:
 
         target = args.model.lower()
 
+        if target in LITELLM_TARGETS:
+            if args.clean_log:
+                self.clean_litellm_logs(dry_run=args.dry_run)
+                return True
+
+            if args.show_log_path:
+                self.show_litellm_log_path()
+                return True
+
+            self.show_litellm_logs(tail=args.tail, follow=args.follow, show_log_path=False)
+            return True
+
+        if target == "all":
+            if args.clean_log:
+                self.clean_all_logs(dry_run=args.dry_run)
+                return True
+
+            if args.show_log_path or args.show_log:
+                self.show_all_log_paths()
+                return True
+
         if args.clean_log:
             self.clean_vllm_logs(target, dry_run=args.dry_run)
             return True
 
         if args.show_log_path:
-            self.show_vllm_log_paths(target)
-            return True
-
-        if target == "all" and args.show_log:
             self.show_vllm_log_paths(target)
             return True
 
@@ -2116,7 +2707,7 @@ Current model values from LiteLLM config:
             self.stop_all_vllm(dry_run=args.dry_run)
             return True
 
-        if target in ("litellm", "llm-lite", "lite-llm"):
+        if target in LITELLM_TARGETS:
             self.stop_litellm(dry_run=args.dry_run)
             return True
 
@@ -2140,13 +2731,9 @@ Current model values from LiteLLM config:
         dry-run mode. Default behavior is conservative (reuse, don't recreate).
         """
         # Handle litellm target
-        if args.model and args.model.lower() in ("litellm", "llm-lite", "lite-llm"):
+        if args.model and args.model.lower() in LITELLM_TARGETS:
             if args.recreate:
                 print("ERROR: --recreate is not allowed for litellm")
-                sys.exit(1)
-
-            if args.clean_log or args.show_log_path:
-                print("ERROR: --clean-log and --show-log-path are not supported for litellm")
                 sys.exit(1)
 
             if args.start:
@@ -2162,7 +2749,22 @@ Current model values from LiteLLM config:
                 self.stop_litellm(dry_run=args.dry_run)
                 return
 
-            print("ERROR: Specify an action for litellm (--start or --stop)")
+            if args.clean_log:
+                self.clean_litellm_logs(dry_run=args.dry_run)
+                return
+
+            if args.show_log_path:
+                self.show_litellm_log_path()
+                return
+
+            if args.show_log:
+                self.show_litellm_logs(tail=args.tail, follow=args.follow, show_log_path=False)
+                return
+
+            print(
+                "ERROR: Specify an action for litellm "
+                "(--start, --stop, --show-log, --show-log-path, or --clean-log)"
+            )
             sys.exit(1)
 
         self.load_models()
@@ -2299,10 +2901,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--recreate", action="store_true")
     parser.add_argument("--no-reuse-existing", action="store_true")
 
-    parser.add_argument("--show-log", action="store_true", help="Show container logs (or paths for 'all')")
+    parser.add_argument(
+        "--show-log",
+        action="store_true",
+        help="Show logs (for 'all': show vLLM + LiteLLM log paths)",
+    )
     parser.add_argument("--stream-log", action="store_true", help="Show and follow logs (equivalent to --show-log --follow)")
-    parser.add_argument("--show-log-path", action="store_true", help="Show Docker log file paths")
-    parser.add_argument("--clean-log", action="store_true", help="Clean/truncate container log files")
+    parser.add_argument(
+        "--show-log-path",
+        action="store_true",
+        help="Show log file paths (Docker + LiteLLM)",
+    )
+    parser.add_argument(
+        "--clean-log",
+        action="store_true",
+        help="Clean/truncate log files (Docker + LiteLLM)",
+    )
     parser.add_argument("--follow", "-f", action="store_true", help="Follow log output (use with --show-log or use --stream-log)")
     parser.add_argument("--tail", default="200")
 
