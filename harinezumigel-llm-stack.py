@@ -1246,7 +1246,7 @@ class LLMStack:
         if not containers:
             print(f"\nModel: {model_name}")
             print("Status: No container found")
-            print(f"\nStart with: harinezumigel-llm-stack {model_name} --start")
+            print(f"\nStart with: {program_name()} {model_name} --start")
             return
 
         print(f"\nModel: {model_name}")
@@ -1413,9 +1413,10 @@ class LLMStack:
             )
 
         model_list = "\n".join(model_lines)
+        prog = program_name()
 
         return f"""
-harinezumigel-llm-stack — Unified LiteLLM + vLLM Launcher
+{prog} — Unified LiteLLM + vLLM Launcher
 -------------------------------------------
 
 Config:
@@ -1432,58 +1433,58 @@ Examples:
   Show available (configured) models:
   -----------------------------------
 
-  harinezumigel-llm-stack --list
+  {prog} --list
 
   Start models (model name or alias):
   -----------------------------------
 
-    harinezumigel-llm-stack mistral_7b --start                # start using model name
-    harinezumigel-llm-stack coder --start                     # start using alias (if configured)
-    harinezumigel-llm-stack mistral_7b --start --stream-log  # start and follow logs (stays attached)
-    harinezumigel-llm-stack mistral_7b --start --dry-run      # preview what would be done
-    harinezumigel-llm-stack mistral_7b --start --recreate     # force recreate container
+    {prog} mistral_7b --start                # start using model name
+    {prog} coder --start                     # start using alias (if configured)
+    {prog} mistral_7b --start --stream-log  # start and follow logs (stays attached)
+    {prog} mistral_7b --start --dry-run      # preview what would be done
+    {prog} mistral_7b --start --recreate     # force recreate container
 
   View logs:
   ----------
 
-    harinezumigel-llm-stack mistral_7b --show-log             # show last 200 lines
-    harinezumigel-llm-stack mistral_7b --stream-log           # show and follow logs
-    harinezumigel-llm-stack mistral_7b --show-log --follow    # equivalent to --stream-log
+    {prog} mistral_7b --show-log             # show last 200 lines
+    {prog} mistral_7b --stream-log           # show and follow logs
+    {prog} mistral_7b --show-log --follow    # equivalent to --stream-log
 
   Show log paths:
   ---------------
 
-    harinezumigel-llm-stack mistral_7b --show-log-path        # show Docker log file path
-    harinezumigel-llm-stack litellm --show-log-path           # show LiteLLM log directory + latest log
-    harinezumigel-llm-stack all --show-log-path               # show vLLM + LiteLLM log paths
-    harinezumigel-llm-stack all --show-log                    # shows paths for all logs
+    {prog} mistral_7b --show-log-path        # show Docker log file path
+    {prog} litellm --show-log-path           # show LiteLLM log directory + latest log
+    {prog} all --show-log-path               # show vLLM + LiteLLM log paths
+    {prog} all --show-log                    # shows paths for all logs
 
   Clean logs:
   -----------
 
-    harinezumigel-llm-stack mistral_7b --clean-log            # truncate log file for one model
-    harinezumigel-llm-stack litellm --clean-log               # remove LiteLLM timestamped logs
-    harinezumigel-llm-stack all --clean-log                   # truncate vLLM + clean LiteLLM logs
+    {prog} mistral_7b --clean-log            # truncate log file for one model
+    {prog} litellm --clean-log               # remove LiteLLM timestamped logs
+    {prog} all --clean-log                   # truncate vLLM + clean LiteLLM logs
   Stop models:
   ------------
 
-  harinezumigel-llm-stack mistral_7b --stop
-  harinezumigel-llm-stack all --stop
+  {prog} mistral_7b --stop
+  {prog} all --stop
 
   Override runtime settings:
   --------------------------
 
-  harinezumigel-llm-stack mistral_7b --start --max-num-seqs 1 --dry-run
-  harinezumigel-llm-stack mistral_7b --start --context-length 32768 --max-input-tokens 28672 --max-output-tokens 4096 --max-num-seqs 1 --dry-run
+  {prog} mistral_7b --start --max-num-seqs 1 --dry-run
+  {prog} mistral_7b --start --context-length 32768 --max-input-tokens 28672 --max-output-tokens 4096 --max-num-seqs 1 --dry-run
 
   LiteLLM proxy:
   --------------
 
-  harinezumigel-llm-stack litellm --start
-    harinezumigel-llm-stack litellm --show-log
-    harinezumigel-llm-stack litellm --show-log-path
-    harinezumigel-llm-stack litellm --clean-log
-  harinezumigel-llm-stack litellm --stop
+  {prog} litellm --start
+    {prog} litellm --show-log
+    {prog} litellm --show-log-path
+    {prog} litellm --clean-log
+  {prog} litellm --stop
 
 Current model values from LiteLLM config:
 {model_list}
@@ -2309,7 +2310,7 @@ Current model values from LiteLLM config:
             print("ERROR: Another LiteLLM instance is already running.")
             print(
                 "Only one LiteLLM instance can run for this config path when "
-                "started via harinezumigel-llm-stack."
+                f"started via {program_name()}."
             )
             print("Running LiteLLM PID(s):")
 
@@ -2319,7 +2320,7 @@ Current model values from LiteLLM config:
             print()
             print(
                 "Stop the existing instance first "
-                "(harinezumigel-llm-stack litellm --stop for this config, "
+                f"({program_name()} litellm --stop for this config, "
                 "or stop it manually)."
             )
             sys.exit(1)
@@ -2658,10 +2659,10 @@ Current model values from LiteLLM config:
             print(f"No container found for model '{target}'.")
             print()
             print("Start the model first:")
-            print(f"  harinezumigel-llm-stack {target} --start")
+            print(f"  {program_name()} {target} --start")
             print()
             print("Or start and show logs:")
-            print(f"  harinezumigel-llm-stack {target} --start --show-log")
+            print(f"  {program_name()} {target} --start --show-log")
             sys.exit(1)
 
         self.show_vllm_logs(resolved, tail=args.tail, follow=args.follow, show_log_path=False)
@@ -2878,9 +2879,15 @@ Current model values from LiteLLM config:
 # ---------------------------------------------------------------------------
 
 
+def program_name() -> str:
+    """Return the invoked filename, preserving renamed scripts and symlinks."""
+    return Path(sys.argv[0]).name
+
+
 def parse_args() -> argparse.Namespace:
     """Parse CLI arguments."""
     parser = argparse.ArgumentParser(
+        prog=program_name(),
         add_help=False,
         formatter_class=argparse.RawTextHelpFormatter,
     )
@@ -2941,7 +2948,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     """Program entry point."""
-    msg = f" harinezumigel-llm-stack {__version__} "
+    msg = f" {program_name()} {__version__} "
     border = "*" * (len(msg) + 2)
     print(f"\n{border}\n*{msg}*\n{border}\n")
     LLMStack(APP).run(parse_args())

@@ -5,7 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [10/20/2026 Revision 65]
+## [10/21/2026 Revision 66]
+
+### Changed
+- `README.md`: clarified that the launcher is not limited to NVIDIA DGX Spark and documented Unix host, Docker/NVIDIA GPU passthrough, architecture, GPU, and driver compatibility requirements for the selected NVIDIA vLLM image
+- `harinezumigel-llm-stack.py`: help examples, startup banner, parser usage errors, and command hints now derive the executable name from the invoked script or symlink
+
+### Added
+- Regression tests for renamed script and symlink names across help output, parser errors, startup banner, and command hints
+
+## [10/21/2026 Revision 67]
 
 ### Added
 - `install.sh`: final red reminder asking whether `<INSTALL_DIR>/.env` has been updated to match the user's LLM setup

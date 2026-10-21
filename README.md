@@ -2,6 +2,8 @@
 
 A Python CLI tool for managing [LiteLLM](https://github.com/BerriAI/litellm) proxy servers and [vLLM](https://github.com/vllm-project/vllm) model backends in Docker containers.
 
+The launcher is **not limited to NVIDIA DGX Spark**. It supports Unix hosts with Docker and NVIDIA GPU passthrough, provided the host architecture, NVIDIA GPU, and installed driver are compatible with the selected NVIDIA-provided vLLM container image.
+
 ⚠️ **Disclaimer**: This project is provided "as is" without warranty of any kind and is not intended for production use without proper validation and testing. This project is not affiliated with LLMStack (llmstack.ai / Promptly).
 
 > **⚠️ Security notice**: LiteLLM always serves the admin web UI at `/ui` — it cannot be disabled via configuration. Restrict access to the LiteLLM port at the network or reverse proxy level if you do not want the UI reachable.
@@ -37,8 +39,10 @@ The script manages the entire lifecycle of your LLM infrastructure:
 
 ## Prerequisites
 
+- A Unix host with a CPU architecture supported by the selected NVIDIA vLLM container image; NVIDIA DGX Spark is not required
 - Python 3.10+ with `pyyaml` package
-- Docker with NVIDIA GPU support
+- Docker with NVIDIA GPU support (NVIDIA Container Toolkit) and a working `--gpus all` configuration
+- An NVIDIA GPU and host driver compatible with the selected NVIDIA NGC vLLM image (`VLLM_DOCKER_IMAGE`)
 - `nvidia-smi` available (for GPU detection)
 - LiteLLM installed in a virtual environment (for proxy server)
 - Pre-downloaded model files in a designated directory
@@ -127,6 +131,10 @@ If the installer reports dependency issues in `/opt/litellm/venv`:
    chmod +x harinezumigel-llm-stack.py
    ```
 
+   You can choose a shorter symlink name, such as `llm`, or rename the script.
+   Help examples, the startup banner, usage errors, and command hints automatically
+   use the invoked script or symlink name (for example, `llm --list`).
+
 5. **Add to PATH** (if needed):
    ```bash
    echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
@@ -190,7 +198,8 @@ contain a literal whitespace-separated `#`; embedded hashes such as
 
 ### NVIDIA Driver / vLLM Image Compatibility
 
-`VLLM_DOCKER_IMAGE` must be compatible with the NVIDIA driver loaded on the host.
+`VLLM_DOCKER_IMAGE` must support the host CPU architecture and NVIDIA GPU, and
+must be compatible with the NVIDIA driver loaded on the host.
 If these do not match, vLLM containers can fail at startup with driver/library
 compatibility errors.
 

@@ -11,6 +11,7 @@ This module tests the core functionality of the LLM stack launcher including:
 """
 
 import errno
+import io
 import json
 import os
 import runpy
@@ -21,6 +22,7 @@ import importlib.util
 import unittest
 from pathlib import Path
 from dataclasses import replace
+from contextlib import redirect_stderr, redirect_stdout
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -2466,6 +2468,86 @@ class TestSafetyGuards(unittest.TestCase):
             self.assertIn("rebuild: true must be specified", output.getvalue())
         finally:
             safe_unlink(temp_config)
+
+
+class TestCLIProgramName(unittest.TestCase):
+    """Keep user-facing commands consistent with the invoked filename."""
+
+    def setUp(self) -> None:
+        self.stack = harinezumigel_llm_stack.LLMStack(harinezumigel_llm_stack.APP)
+
+    def test_help_uses_invoked_filename(self) -> None:
+        for invoked, expected in [
+            ("harinezumigel-llm-stack", "harinezumigel-llm-stack"),
+            ("./short.py", "short.py"),
+            ("/tmp/bin/llm", "llm"),
+        ]:
+            with self.subTest(invoked=invoked), patch.object(sys, "argv", [invoked]):
+                text = self.stack.generate_help()
+                self.assertIn(f"{expected} — Unified LiteLLM", text)
+                commands = [
+                    line.strip()
+                    for line in text.splitlines()
+                    if " --" in line and not line.lstrip().startswith("-")
+                ]
+                self.assertEqual(len(commands), 25)
+                for command in commands:
+                    self.assertTrue(command.startswith(f"{expected} "), command)
+                if expected != "harinezumigel-llm-stack":
+                    self.assertNotIn("harinezumigel-llm-stack", text)
+
+    def test_parser_error_uses_invoked_filename(self) -> None:
+        output = io.StringIO()
+        with patch.object(sys, "argv", ["/tmp/bin/llm", "--invalid-option"]):
+            with redirect_stderr(output), self.assertRaises(SystemExit) as error:
+                harinezumigel_llm_stack.parse_args()
+        self.assertEqual(error.exception.code, 2)
+        self.assertIn("usage: llm ", output.getvalue())
+        self.assertIn("llm: error:", output.getvalue())
+        self.assertNotIn("harinezumigel-llm-stack", output.getvalue())
+
+    def test_banner_uses_invoked_filename(self) -> None:
+        output = io.StringIO()
+        with patch.object(sys, "argv", ["llm", "--help"]):
+            with patch.object(harinezumigel_llm_stack.LLMStack, "run") as run:
+                with redirect_stdout(output):
+                    harinezumigel_llm_stack.main()
+        self.assertIn(f" llm {harinezumigel_llm_stack.__version__} ", output.getvalue())
+        self.assertNotIn("harinezumigel-llm-stack", output.getvalue())
+        self.assertTrue(run.call_args.args[0].help)
+
+    def test_missing_container_status_uses_invoked_filename(self) -> None:
+        output = io.StringIO()
+        with patch.object(sys, "argv", ["llm"]):
+            with patch.object(self.stack, "_find_all_vllm_containers", return_value=[]):
+                with redirect_stdout(output):
+                    self.stack.show_container_status("coder")
+        self.assertIn("Start with: llm coder --start", output.getvalue())
+        self.assertNotIn("harinezumigel-llm-stack", output.getvalue())
+
+    def test_missing_container_logs_use_invoked_filename(self) -> None:
+        output = io.StringIO()
+        with patch.object(sys, "argv", ["llm", "coder", "--show-log"]):
+            args = harinezumigel_llm_stack.parse_args()
+            with patch.object(self.stack, "_resolve_model_name", return_value="coder"):
+                with patch.object(self.stack, "_find_all_vllm_containers", return_value=[]):
+                    with redirect_stdout(output), self.assertRaises(SystemExit) as error:
+                        self.stack.handle_logs(args)
+        self.assertEqual(error.exception.code, 1)
+        self.assertIn("  llm coder --start\n", output.getvalue())
+        self.assertIn("  llm coder --start --show-log\n", output.getvalue())
+        self.assertNotIn("harinezumigel-llm-stack", output.getvalue())
+
+    def test_existing_litellm_instance_hint_uses_invoked_filename(self) -> None:
+        output = io.StringIO()
+        with patch.object(sys, "argv", ["llm"]):
+            with patch.object(self.stack, "_find_litellm_pids", return_value=["other-pid"]):
+                with redirect_stdout(output), self.assertRaises(SystemExit) as error:
+                    self.stack.start_litellm()
+        self.assertEqual(error.exception.code, 1)
+        self.assertIn("started via llm.", output.getvalue())
+        self.assertIn("(llm litellm --stop for this config,", output.getvalue())
+        self.assertNotIn("harinezumigel-llm-stack", output.getvalue())
 
 
 class TestCLIParseArgs(unittest.TestCase):

@@ -120,6 +120,9 @@ model_list:
       dtype: auto
       max_num_seqs: 2
       max_num_batched_tokens: 16384
+      speculative_config:
+        model: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+        num_speculative_tokens: 5
       enable_prefix_caching: true
       cache_creation_input_token_cost: 0
       cache_read_input_token_cost: 0
@@ -465,8 +468,9 @@ model_list:
       quantization: null
       kv_cache_dtype: auto
       speculative_config:
-        method: dflash
-        model: z-lab/Qwen3-Coder-30B-A3B-DFlash
+        method: ngram
+        model: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+        num_speculative_tokens: 5
       enable_prefix_caching: true
       enable_auto_tool_choice: true
       tool_call_parser: qwen3_xml
