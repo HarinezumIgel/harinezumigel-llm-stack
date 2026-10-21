@@ -43,9 +43,11 @@ The script manages the entire lifecycle of your LLM infrastructure:
 - Python 3.10+ with `pyyaml` package
 - Docker with NVIDIA GPU support (NVIDIA Container Toolkit) and a working `--gpus all` configuration
 - An NVIDIA GPU and host driver compatible with the selected NVIDIA NGC vLLM image (`VLLM_DOCKER_IMAGE`)
+- Access to NVIDIA NGC (free NVIDIA Developer account may be required)
 - `nvidia-smi` available (for GPU detection)
 - LiteLLM installed in a virtual environment (for proxy server)
 - Pre-downloaded model files in a designated directory
+
 
 ### Quick Install
 
