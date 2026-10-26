@@ -118,7 +118,13 @@ import yaml
 
 # Resolve the source directory so renamed/symlinked commands find sibling modules.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from hls_startup import BackendHandle, StartupError, StartupJob, run_startup
+from hls_startup import (
+    BackendHandle,
+    StartupError,
+    StartupJob,
+    container_started_at,
+    run_startup,
+)
 from hls_selection import load_groups, select_models
 from hls_preflight import PreflightChecks
 from hls_terminal import terminal_style, terminal_print as print
@@ -1475,7 +1481,8 @@ Examples:
   View logs:
   ----------
 
-    {prog} {"mistral_7b --show-log":<42} # show last 200 lines
+    {prog} {"mistral_7b --show-log":<42} # show full saved log history
+    {prog} {"mistral_7b --show-log --tail 50":<42} # show only the last 50 lines
     {prog} {"mistral_7b --stream-log":<42} # show and follow logs
     {prog} {"mistral_7b --show-log --follow":<42} # equivalent to --stream-log
 
@@ -1547,6 +1554,17 @@ Examples:
             command = ["docker", "logs", "--tail", str(tail)]
 
         if follow:
+            if since is None:
+                result = run_command(
+                    ["docker", "inspect", "-f", "{{.State.StartedAt}}", container_name],
+                    capture=True,
+                )
+                started_at = result.stdout.strip()
+                if result.returncode != 0 or not started_at:
+                    print(f"ERROR: Cannot determine latest start for {container_name}")
+                    print(result.stderr.strip())
+                    sys.exit(1)
+                command.extend(["--since", started_at])
             command.append("-f")
 
         command.append(container_name)
@@ -3126,7 +3144,7 @@ Examples:
                     backend=backend,
                     launch=partial(self.start_vllm, model, options),
                     reused=not args.recreate
-                    and self._docker_container_state(backend.container) is not None,
+                    and self._docker_container_state(backend.container) == "running",
                     secrets=(model.api_key, os.environ.get("LOCAL_VLLM_API_KEY", "")),
                 )
             )
@@ -3164,6 +3182,7 @@ Examples:
             self.show_container_logs(
                 job.backend.container,
                 tail="100",
+                since=container_started_at(job.backend.container),
                 redact_values=job.secrets,
             )
 
@@ -3300,8 +3319,8 @@ Examples:
             sys.exit(1)
 
         if args.start:
-            log_since = datetime.datetime.now(datetime.timezone.utc).strftime(
-                "%Y-%m-%dT%H:%M:%SZ"
+            log_since = datetime.datetime.now(datetime.timezone.utc).isoformat(
+                timespec="microseconds"
             )
             self.start_vllm(
                 model,
@@ -3415,7 +3434,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Follow log output (use with --show-log or use --stream-log)",
     )
-    parser.add_argument("--tail", default="200")
+    parser.add_argument("--tail", default="all")
 
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(

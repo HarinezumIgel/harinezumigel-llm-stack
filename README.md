@@ -666,6 +666,13 @@ group indefinitely is not supported. Dry-runs do not print these reminders.
 Batch selections reject indefinite following; follow one target separately
 after startup. `all --show-log` shows log paths rather than merged streams.
 JSON-escaped stack traces are expanded for readability.
+Startup monitoring filters logs by the current start timestamp for new,
+recreated, or restarted containers, so previous runs' shutdown messages are not
+replayed. Already-running containers retain recent log history in the startup
+display. Standalone backend `--stream-log` (or `--show-log --follow`) shows only
+the latest container run, using Docker's `StartedAt` timestamp, then follows new
+output. `--show-log` without following shows the complete saved history by
+default; use `--tail N` to limit it. Logs are not deleted by either operation.
 
 Proxy logs are timestamped under `/opt/litellm/logs`; this directory is created
 when needed, except during dry runs or cleanup. Proxy cleanup removes only

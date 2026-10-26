@@ -60,9 +60,6 @@ def run_startup(
     exit_code = 0
     for index, job in enumerate(jobs):
         print(f"\n=== [{index + 1}/{len(jobs)}] Starting {job.label} ===", flush=True)
-        since = datetime.datetime.now(datetime.timezone.utc).strftime(
-            "%Y-%m-%dT%H:%M:%SZ"
-        )
         try:
             job.launch()
             if dry_run:
@@ -73,6 +70,13 @@ def run_startup(
                 continue
             if job.backend is None or job.port is None:
                 raise StartupError(f"Missing readiness endpoint for {job.name}")
+            since = (
+                datetime.datetime.now(datetime.timezone.utc).isoformat(
+                    timespec="microseconds"
+                )
+                if job.reused
+                else container_started_at(job.backend.container)
+            )
 
             def sanitized_line(line: str) -> str:
                 for secret in job.secrets:
@@ -84,7 +88,7 @@ def run_startup(
                 job.backend,
                 timeout=timeout,
                 show_logs=not quiet,
-                since=None if job.reused else since,
+                since=since,
             )
             results[index] = "ready"
             message = f"READY: {job.label} - port {job.port}"
@@ -101,7 +105,7 @@ def run_startup(
             print(f"ERROR: Startup failed for {job.name}: {exc}")
             try:
                 diagnose(job)
-            except (OSError, SystemExit) as log_exc:
+            except (StartupError, OSError, SystemExit) as log_exc:
                 print(f"ERROR: Cannot display failure logs: {log_exc}")
             print(f"Follow logs: {program} {shlex.quote(job.name)} --stream-log")
             print("Startup stopped; previously started containers are left running.")
@@ -112,6 +116,22 @@ def run_startup(
         port = f"port={job.port}" if job.port is not None else "no readiness check"
         print(f"{job.label:<24} {result:<16} {port}")
     return exit_code
+
+
+def container_started_at(container: str) -> str:
+    """Return Docker's start timestamp for filtering logs to the current run."""
+    result = subprocess.run(
+        ["docker", "inspect", "--format", "{{.State.StartedAt}}", container],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    started_at = result.stdout.strip()
+    if result.returncode or not started_at:
+        detail = result.stderr.strip()
+        suffix = f": {detail}" if detail else ""
+        raise StartupError(f"Cannot determine start time for {container}{suffix}")
+    return started_at
 
 
 def container_state(container: str) -> tuple[str, int]:
@@ -162,15 +182,30 @@ class StartupMonitor:
         follower: subprocess.Popen[bytes] | None = None
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         pending = ""
+        cutoff = datetime.datetime.fromisoformat(since) if since is not None else None
+
+        def _print_line(line: str) -> None:
+            timestamp, separator, message = line.partition(" ")
+            if separator:
+                try:
+                    recorded_at = datetime.datetime.fromisoformat(timestamp)
+                except ValueError:
+                    pass
+                else:
+                    if recorded_at.tzinfo is not None:
+                        if cutoff is not None and recorded_at < cutoff:
+                            return
+                        line = message
+            builtins.print(self.format_line(line.rstrip("\r")), flush=True)
 
         def emit(chunk: bytes, *, final: bool = False) -> None:
             nonlocal pending
             pending += decoder.decode(chunk, final=final)
             while "\n" in pending:
                 line, pending = pending.split("\n", 1)
-                builtins.print(self.format_line(line.rstrip("\r")), flush=True)
+                _print_line(line)
             if final and pending:
-                builtins.print(self.format_line(pending), flush=True)
+                _print_line(pending)
                 pending = ""
 
         with selectors.DefaultSelector() as selector:
@@ -193,7 +228,14 @@ class StartupMonitor:
                     ):
                         break
                     if show_logs and follower is None:
-                        command = ["docker", "logs", "--tail", "200", "--follow"]
+                        command = [
+                            "docker",
+                            "logs",
+                            "--timestamps",
+                            "--tail",
+                            "200",
+                            "--follow",
+                        ]
                         if since is not None:
                             command.extend(["--since", since])
                         command.append(backend.container)

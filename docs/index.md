@@ -110,6 +110,9 @@ harinezumigel-llm-stack all --show-log-path
 
 `--stream-log` follows one target indefinitely; group commands do not support
 indefinite log following. Group starts monitor backend readiness and then return.
+Backend streaming shows only the latest container run, not earlier shutdowns.
+`--show-log` without following shows all saved history unless limited with
+`--tail N`; neither operation deletes logs.
 For a single backend, `--start --startup-logs` monitors startup until readiness
 without remaining attached indefinitely.
 

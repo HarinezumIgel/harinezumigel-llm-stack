@@ -84,6 +84,12 @@ class TestMultiModel(unittest.TestCase):
         self.stop_litellm = patch.object(self.stack, "stop_litellm").start()
         patch.object(self.stack, "_find_litellm_pids", return_value=[]).start()
         self.monitor = patch.object(hls_startup.StartupMonitor, "wait").start()
+        self.started_at = patch.object(
+            hls_startup,
+            "container_started_at",
+            return_value="2026-10-26T15:06:24.359526098Z",
+        ).start()
+        patch.object(app, "container_started_at", self.started_at).start()
 
     def write_config(self):
         self.config_path.write_text(yaml.safe_dump(self.data), encoding="utf-8")
@@ -503,6 +509,23 @@ class TestMultiModel(unittest.TestCase):
         self.assertIn("not attempted", self.output.getvalue())
         self.assertIn("--stream-log", self.output.getvalue())
 
+    def test_failure_logs_exclude_previous_container_runs(self):
+        self.monitor.side_effect = hls_startup.StartupError("readiness timeout")
+        with (
+            patch.object(self.stack, "_docker_container_state", return_value="running"),
+            patch.object(
+                app,
+                "container_started_at",
+                return_value="2026-10-26T15:06:24.359526098Z",
+            ),
+            patch.object(self.stack, "show_container_logs") as logs,
+        ):
+            with self.assertRaises(SystemExit):
+                self.run_command("--group", "rag", "--start")
+        self.assertEqual(
+            logs.call_args.kwargs["since"], "2026-10-26T15:06:24.359526098Z"
+        )
+
     def test_launch_failure_reports_summary(self):
         self.start.side_effect = SystemExit(1)
         with self.assertRaises(SystemExit) as error:
@@ -519,12 +542,33 @@ class TestMultiModel(unittest.TestCase):
         self.assertEqual(self.start.call_count, 1)
         self.assertIn("left running", self.output.getvalue())
 
-    def test_reused_backend_gets_recent_logs_not_start_timestamp(self):
+    def test_reused_backend_filters_logs_since_group_start(self):
         with patch.object(
             self.stack, "_docker_container_state", return_value="running"
         ):
             self.run_command("--group", "rag", "--start")
-        self.assertIsNone(self.monitor.call_args.kwargs["since"])
+        self.started_at.assert_not_called()
+        for call in self.monitor.call_args_list:
+            self.assertRegex(
+                call.kwargs["since"],
+                r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}\+00:00$",
+            )
+
+    def test_restarted_backend_filters_logs_since_docker_start(self):
+        with patch.object(self.stack, "_docker_container_state", return_value="exited"):
+            self.run_command("--group", "rag", "--start")
+        self.assertEqual(self.started_at.call_count, 2)
+        self.assertTrue(
+            all(
+                call.kwargs["since"] == "2026-10-26T15:06:24.359526098Z"
+                for call in self.monitor.call_args_list
+            )
+        )
+
+    def test_single_monitored_restart_filters_historical_logs(self):
+        with patch.object(self.stack, "_docker_container_state", return_value="exited"):
+            self.run_command("first", "--start", "--startup-logs")
+        self.assertIsNotNone(self.monitor.call_args.kwargs["since"])
 
     def test_startup_formatter_redacts_secret(self):
         with patch.object(hls_startup, "StartupMonitor") as monitor:
@@ -555,6 +599,34 @@ class TestMultiModel(unittest.TestCase):
             f"{app.program_name()} first --stream-log", self.output.getvalue()
         )
         self.assertNotIn("group/batch startup", self.output.getvalue())
+
+    def test_log_view_defaults_to_full_history(self):
+        self.assertEqual(self.args("first", "--show-log").tail, "all")
+        self.assertEqual(self.args("first", "--show-log", "--tail", "50").tail, "50")
+
+    def test_stream_filters_at_latest_container_start(self):
+        with (
+            patch.object(app, "run_command") as inspect,
+            patch.object(app, "_stream_formatted_logs", return_value=0) as stream,
+            redirect_stdout(self.output),
+        ):
+            inspect.return_value = subprocess.CompletedProcess(
+                [], 0, "2026-10-26T15:00:00.123456789Z\n", ""
+            )
+            self.stack.show_container_logs("vllm-test-8001", tail="all", follow=True)
+        self.assertEqual(
+            stream.call_args.args[0],
+            [
+                "docker",
+                "logs",
+                "--tail",
+                "all",
+                "--since",
+                "2026-10-26T15:00:00.123456789Z",
+                "-f",
+                "vllm-test-8001",
+            ],
+        )
 
     def test_container_lookup_excludes_longer_model_names(self):
         names = [
@@ -1143,6 +1215,97 @@ class TestStartupMonitor(unittest.TestCase):
             hls_startup, "health_ready", return_value=False
         ).start()
         self.monitor = hls_startup.StartupMonitor(lambda line: line)
+
+    def test_container_started_at_uses_docker_inspect_timestamp(self):
+        timestamp = "2026-10-26T15:06:24.359526098Z"
+        with patch.object(hls_startup.subprocess, "run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0, timestamp + "\n", "")
+            self.assertEqual(
+                hls_startup.container_started_at("test-container"), timestamp
+            )
+        run.assert_called_once_with(
+            [
+                "docker",
+                "inspect",
+                "--format",
+                "{{.State.StartedAt}}",
+                "test-container",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def test_log_follower_filters_since_current_container_start(self):
+        timestamp = "2026-10-26T15:06:24.359526098Z"
+        popen = subprocess.Popen
+        command = []
+
+        def spawn(*args, **kwargs):
+            command.extend(args[0])
+            return popen(
+                [sys.executable, "-c", "import time; time.sleep(30)"], **kwargs
+            )
+
+        self.health.side_effect = [False, True]
+        with patch.object(hls_startup.subprocess, "Popen", side_effect=spawn):
+            self.monitor.wait(
+                self.backend,
+                timeout=3,
+                show_logs=True,
+                since=timestamp,
+            )
+
+        self.assertEqual(
+            command,
+            [
+                "docker",
+                "logs",
+                "--timestamps",
+                "--tail",
+                "200",
+                "--follow",
+                "--since",
+                timestamp,
+                "test-container",
+            ],
+        )
+
+    def test_replayed_history_is_filtered_from_displayed_output(self):
+        popen = subprocess.Popen
+
+        def _spawn(*args, **kwargs):
+            return popen(
+                [
+                    sys.executable,
+                    "-u",
+                    "-c",
+                    "import sys; "
+                    "print('2026-10-26T14:00:00.000000000Z PREVIOUS_BOOT'); "
+                    "print('2026-10-26T15:06:24.359526098Z CURRENT_BOOT'); "
+                    "print('2026-10-26T15:06:25.000000000Z CURRENT_STDERR', "
+                    "file=sys.stderr); sys.stdin.read()",
+                ],
+                stdin=subprocess.PIPE,
+                **kwargs,
+            )
+
+        self.health.side_effect = [False, False, True]
+        with (
+            patch.object(hls_startup.subprocess, "Popen", side_effect=_spawn),
+            redirect_stdout(self.output),
+        ):
+            self.monitor.wait(
+                self.backend,
+                timeout=3,
+                show_logs=True,
+                since="2026-10-26T15:06:24.359526098Z",
+            )
+        text = self.output.getvalue()
+        self.assertNotIn("PREVIOUS_BOOT", text)
+        self.assertIn("CURRENT_BOOT", text)
+        self.assertIn("CURRENT_STDERR", text)
+        self.assertNotIn("2026-10-26T", text)
 
     def test_already_healthy_never_opens_log_follower(self):
         self.health.return_value = True
