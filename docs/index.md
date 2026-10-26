@@ -5,6 +5,8 @@ title: Home
 
 # Local LLM workloads, one CLI
 
+![Hedgehog mascot](https://raw.githubusercontent.com/HarinezumIgel/RAG-LCC/main/docs/assets/AI_Igel.png)
+
 Manage a host-based [LiteLLM](https://github.com/BerriAI/litellm) proxy and
 [vLLM](https://github.com/vllm-project/vllm) backends running in NVIDIA
 GPU-enabled Docker containers. Clients connect through an OpenAI-compatible API.
@@ -12,6 +14,44 @@ GPU-enabled Docker containers. Clients connect through an OpenAI-compatible API.
 The launcher handles model selection, named model groups, container reuse,
 startup monitoring, and logs. Deployment settings live in configuration files,
 not per-start CLI overrides.
+
+## How the components fit together
+
+```text
+Client (Copilot, RAG app, ...)
+               |
+               | OpenAI-compatible HTTP API
+               v
++---------------------------------------------------------+
+| Target host: 192.168.100.50                             |
+|                                                         |
+| +-----------------------------------------------------+ |
+| | LiteLLM proxy (host process, LAN port 4000)         | |
+| +------------+----------------------------------------+ |
+|              |                                          |
+|              | Local backend API requests               |
+|              v                                          |
+| Docker host ports bound to 127.0.0.1                    |
+|   8003 -> [vLLM: Guard]                                 |
+|   8001 -> [vLLM: Mistral]                               |
+|   8013 -> [vLLM: Judge]                                 |
+|   8005 -> [vLLM: Coder]  (alternative workload)         |
+|              |                                          |
+|       NVIDIA GPU / shared memory                        |
+|       Model files mounted from /opt/models              |
+|                                                         |
+| harinezumigel-llm-stack CLI                             |
+|   reads config/env + config/config.yaml                 |
+|   manages Docker backends and the host LiteLLM process  |
++---------------------------------------------------------+
+```
+
+The CLI controls services; inference requests go through LiteLLM directly to a
+backend. A RAG app coordinates guard, inference, and judge calls itself.
+These backends are workload choices, not a requirement to run all models at
+once. Groups make it easier to manage the services belonging to each workload.
+The host IP and ports shown here match the configuration example; adapt them
+to your deployment.
 
 ## Get started
 

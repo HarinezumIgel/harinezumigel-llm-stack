@@ -1,5 +1,7 @@
 # harinezumigel-llm-stack
 
+![Hedgehog mascot](https://raw.githubusercontent.com/HarinezumIgel/RAG-LCC/main/docs/assets/AI_Igel.png)
+
 Manage a host-based [LiteLLM](https://github.com/BerriAI/litellm) proxy and
 [vLLM](https://github.com/vllm-project/vllm) backends in NVIDIA GPU-enabled Docker
 containers through one Python CLI. Clients use an OpenAI-compatible API; the
@@ -7,6 +9,43 @@ launcher handles model selection, container reuse, startup monitoring, and logs.
 
 This is not limited to NVIDIA DGX Spark: your host architecture, GPU, and driver
 must support the selected NVIDIA NGC vLLM image.
+
+## Components at a glance
+
+```text
+Client (Copilot, RAG app, ...)
+               |
+               | OpenAI-compatible HTTP API
+               v
++---------------------------------------------------------+
+| Target host: 192.168.100.50                             |
+|                                                         |
+| +-----------------------------------------------------+ |
+| | LiteLLM proxy (host process, LAN port 4000)         | |
+| +------------+----------------------------------------+ |
+|              |                                          |
+|              | Local backend API requests               |
+|              v                                          |
+| Docker host ports bound to 127.0.0.1                    |
+|   8003 -> [vLLM: Guard]                                 |
+|   8001 -> [vLLM: Mistral]                               |
+|   8013 -> [vLLM: Judge]                                 |
+|   8005 -> [vLLM: Coder]  (alternative workload)         |
+|              |                                          |
+|       NVIDIA GPU / shared memory                        |
+|       Model files mounted from /opt/models              |
+|                                                         |
+| harinezumigel-llm-stack CLI                             |
+|   reads config/env + config/config.yaml                 |
+|   manages Docker backends and the host LiteLLM process  |
++---------------------------------------------------------+
+```
+
+The CLI is the control tool, not part of the inference request path. LiteLLM
+routes requests to the selected backend model; it does not automatically run a
+guard/inference/judge pipeline. That orchestration belongs to the client app.
+The backends above illustrate configured choices, not models that must all run
+together. Named groups select which services to manage.
 
 ## Documentation website
 
