@@ -1,0 +1,3 @@
+title: harinezumigel-llm-stack
+description: Manage a host-based LiteLLM proxy and Docker-based vLLM backends through one CLI.
+theme: jekyll-theme-cayman

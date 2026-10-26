@@ -31,8 +31,9 @@ cd harinezumigel-llm-stack
 pip install pyyaml pylint
 
 # Set up test environment
-cp .env.example /opt/litellm/.env
-cp config.yaml.example /opt/litellm/config.yaml
+mkdir -p /opt/litellm/config
+cp config/env.example /opt/litellm/config/env
+cp config/config.yaml.example /opt/litellm/config/config.yaml
 # Edit files with your local paths
 ```
 
@@ -103,7 +104,7 @@ harinezumigel-llm-stack test-model --dry-run
 
 # Test error handling
 harinezumigel-llm-stack nonexistent-model
-harinezumigel-llm-stack model-name --port 99999
+harinezumigel-llm-stack nonexistent-model --start
 
 # Test safety features
 harinezumigel-llm-stack model-name --recreate --dry-run
@@ -226,7 +227,7 @@ Any other relevant information
 4. **Actual behavior**: What actually happens
 5. **Environment**: OS, Python version, Docker version
 6. **Logs**: Relevant error messages or logs
-7. **Configuration**: Sanitized .env and config.yaml (remove secrets!)
+7. **Configuration**: Sanitized env and config.yaml (remove secrets!)
 
 ### Bug Report Template
 

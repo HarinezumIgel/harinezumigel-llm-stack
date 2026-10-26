@@ -10,8 +10,8 @@ DISCLAIMER: This project is not affiliated with LLMStack (llmstack.ai / Promptly
 ## Overview
 
 The script reads configuration from two sources:
-- Deployment settings: /opt/litellm/.env (or HLS_ENV_FILE)
-- Model runtime settings: config.yaml under INSTALLED_BASE (/opt/litellm)
+- Deployment settings: /opt/litellm/config/env
+- Model runtime settings: /opt/litellm/config/config.yaml
 
 It manages:
 1. LiteLLM proxy server (native Python process)
@@ -51,12 +51,6 @@ It manages:
     # Start a model and stream logs (stays attached)
     harinezumigel-llm-stack mistral_7b --start --stream-log
 
-    # Start with explicit port (works with both name and alias)
-    harinezumigel-llm-stack qwen-coder --start --port 8003
-
-    # Recreate container with new settings
-    harinezumigel-llm-stack qwen2_5_32b_awq --start --recreate --max-num-seqs 1
-
     # Preview changes without executing
     harinezumigel-llm-stack mistral_7b --start --dry-run
 
@@ -91,7 +85,7 @@ It manages:
     harinezumigel-llm-stack coder --stop  # using alias
     harinezumigel-llm-stack all --stop
 The script does not hardcode model ports, bind hosts, Docker image names, or
-model paths. All values come from .env and config.yaml files.
+model paths. All values come from env and config.yaml files.
 
 See README.md for configuration details.
 
@@ -102,6 +96,8 @@ License: MIT
 from __future__ import annotations
 
 import argparse
+import builtins
+import copy
 import datetime
 import errno
 import json
@@ -112,17 +108,47 @@ import socket
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Callable, cast
 from urllib.parse import ParseResult, urlparse
 
 import yaml
 
-__version__ = "1.4.0/63 10/19/2026"
+# Resolve the source directory so renamed/symlinked commands find sibling modules.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hls_startup import BackendHandle, StartupError, StartupJob, run_startup
+from hls_selection import load_groups, select_models
+from hls_preflight import PreflightChecks
+from hls_terminal import terminal_style, terminal_print as print
 
-_RED = "\033[31m"
-_RESET = "\033[0m"
+__version__ = "1.5.0/81 10/26/2026"
+
+
+def style_help(text: str, program: str) -> str:
+    """Style completed help lines so ANSI escapes cannot affect column alignment."""
+    lines: list[str] = []
+    for line in text.splitlines(keepends=True):
+        content = line.rstrip("\n")
+        ending = line[len(content) :]
+        stripped = content.strip()
+        if content.startswith(f"    {program} "):
+            command, separator, comment = content.partition(" #")
+            command_text = command.rstrip()
+            padding = command[len(command_text) :]
+            content = terminal_style(command_text, accent=True) + padding
+            if separator:
+                content += separator + comment
+        elif (
+            stripped.endswith(":")
+            or stripped == f"{program} — Unified LiteLLM + vLLM Launcher"
+        ):
+            content = terminal_style(content)
+        lines.append(content + ending)
+    return "".join(lines)
+
+
 LITELLM_TARGETS = ("litellm", "llm-lite", "lite-llm")
 VLLM_CONTAINER_PREFIX = "vllm-"
 DOCKER_LOG_ROOT = Path("/var/lib/docker")
@@ -140,7 +166,7 @@ if not INSTALLED_BASE.is_dir():
 # ---------------------------------------------------------------------------
 # Environment loading
 # ---------------------------------------------------------------------------
-# These functions safely load and parse environment variables from .env files
+# These functions safely load and parse environment variables from env files
 # and provide type-safe access with validation.
 
 
@@ -176,7 +202,7 @@ def load_env_file(path: str) -> None:
       KEY=value # inline comment (outside quotes)
 
     Values from the env file override already-set process variables. This keeps
-    /opt/litellm/.env authoritative for this launcher.
+    /opt/litellm/config/env authoritative for this launcher.
 
     Safety: This function only reads files and sets environment variables.
     It does not execute shell commands or modify files.
@@ -259,12 +285,12 @@ def env_int(name: str, default: str | None = None, *, required: bool = False) ->
 
 
 # Load environment variables early (before AppConfig initialization)
-load_env_file(os.environ.get("HLS_ENV_FILE", str(INSTALLED_BASE / ".env")))
+load_env_file(str(INSTALLED_BASE / "config" / "env"))
 
 
 @dataclass(frozen=True)
 class AppConfig:  # pylint: disable=too-many-instance-attributes
-    """Application-wide settings read from .env.
+    """Application-wide settings read from env.
 
     This dataclass holds all deployment configuration such as paths,
     ports, and Docker settings. Values are loaded from environment
@@ -284,15 +310,13 @@ class AppConfig:  # pylint: disable=too-many-instance-attributes
     vllm_docker_image: str
     vllm_model_volume: str
     vllm_cache_volume: str
-    vllm_auto_port_start: int
-    vllm_auto_port_end: int
 
     @classmethod
     def from_env(cls) -> "AppConfig":
         """Build AppConfig from environment variables."""
         return cls(
-            env_file=os.environ.get("HLS_ENV_FILE", str(INSTALLED_BASE / ".env")),
-            litellm_config=str(INSTALLED_BASE / "config.yaml"),
+            env_file=str(INSTALLED_BASE / "config" / "env"),
+            litellm_config=str(INSTALLED_BASE / "config" / "config.yaml"),
             model_root=env_string("MODEL_ROOT", required=True),
             litellm_venv_activate=env_string("LITELLM_VENV_ACTIVATE", required=True),
             litellm_bin=env_string("LITELLM_BIN", required=True),
@@ -304,8 +328,6 @@ class AppConfig:  # pylint: disable=too-many-instance-attributes
             vllm_docker_image=env_string("VLLM_DOCKER_IMAGE", required=True),
             vllm_model_volume=env_string("VLLM_MODEL_VOLUME", required=True),
             vllm_cache_volume=env_string("VLLM_CACHE_VOLUME", required=True),
-            vllm_auto_port_start=env_int("VLLM_AUTO_PORT_START", default="8001"),
-            vllm_auto_port_end=env_int("VLLM_AUTO_PORT_END", default="8010"),
         )
 
 
@@ -432,7 +454,7 @@ def format_sampling_parameters(
         litellm_params: Parameters from litellm_params
 
     Returns:
-        List of formatted strings like "temperature=0.7(litellm)"
+        List of formatted strings like "temperature=0.7(proxy default)"
     """
     sampling_parts: list[str] = []
     for param_name in [
@@ -447,31 +469,9 @@ def format_sampling_parameters(
         litellm_val = litellm_params.get(param_name)
         final_val = override_val if override_val is not None else litellm_val
         if final_val is not None:
-            source = "model-spec" if override_val is not None else "litellm"
+            source = "backend default" if override_val is not None else "proxy default"
             sampling_parts.append(f"{param_name}={final_val}({source})")
     return sampling_parts
-
-
-def extract_nvidia_driver_mismatch(message: str) -> tuple[str, str] | None:
-    """Extract required/detected driver versions from NVIDIA runtime errors.
-
-    Typical message pattern:
-    "This container was built for NVIDIA Driver Release 595.58 or later,
-    but version 580.178.04 was detected"
-    """
-    match = re.search(
-        r"NVIDIA Driver Release\s+([0-9]+(?:\.[0-9]+){1,2})\s+or later,\s+"
-        r"but version\s+([0-9]+(?:\.[0-9]+){1,2})\s+was detected",
-        message,
-        flags=re.IGNORECASE,
-    )
-
-    if match is None:
-        return None
-
-    required = match.group(1)
-    detected = match.group(2)
-    return required, detected
 
 
 def port_in_use(port: int, host: str) -> bool:
@@ -601,7 +601,12 @@ def _format_log_line(line: str, *, pretty_debug: bool = False) -> str:
         return line
 
 
-def _stream_formatted_logs(command: list[str], *, pretty_debug: bool = False) -> int:
+def _stream_formatted_logs(
+    command: list[str],
+    *,
+    pretty_debug: bool = False,
+    redact_values: tuple[str, ...] = (),
+) -> int:
     """Run *command* and stream its merged stdout/stderr with log formatting."""
     with subprocess.Popen(
         command,
@@ -611,7 +616,10 @@ def _stream_formatted_logs(command: list[str], *, pretty_debug: bool = False) ->
     ) as proc:
         assert proc.stdout is not None
         for raw in proc.stdout:
-            print(
+            for secret in redact_values:
+                if secret:
+                    raw = raw.replace(secret, "***REDACTED***")
+            builtins.print(
                 _format_log_line(raw.rstrip("\n"), pretty_debug=pretty_debug),
                 flush=True,
             )
@@ -701,6 +709,51 @@ class ModelDeployment:  # pylint: disable=too-many-instance-attributes
     allow_rebuild: bool
     rebuild_key_present: bool = False
 
+    def generation_settings(self) -> tuple[str, str | None]:
+        """Resolve and validate generation defaults before lifecycle operations."""
+        source = self.model_info.get("generation_config", "vllm")
+        if not isinstance(source, str) or not source.strip():
+            print(
+                f"ERROR: Model '{self.name}': model_info.generation_config "
+                "must be a non-empty string."
+            )
+            sys.exit(1)
+
+        overrides = self.model_info.get("override_generation_config")
+        if overrides is None:
+            return source, None
+        if not isinstance(overrides, dict):
+            print(
+                f"ERROR: Model '{self.name}': "
+                "model_info.override_generation_config must be a mapping."
+            )
+            sys.exit(1)
+
+        generation_overrides = cast(dict[object, object], overrides)
+        duplicates = sorted(
+            str(key) for key in generation_overrides if key in self.litellm_params
+        )
+        if duplicates:
+            print(
+                f"ERROR: Model '{self.name}': duplicate generation parameters in "
+                "litellm_params and model_info.override_generation_config: "
+                f"{', '.join(duplicates)}. Define each default in one location only; "
+                "prefer model_info.override_generation_config for backend defaults."
+            )
+            sys.exit(1)
+
+        try:
+            overrides_arg = json.dumps(
+                overrides, separators=(",", ":"), allow_nan=False
+            )
+        except (TypeError, ValueError) as exc:
+            print(
+                f"ERROR: Model '{self.name}': "
+                f"Invalid model_info.override_generation_config: {exc}"
+            )
+            sys.exit(1)
+        return source, overrides_arg
+
 
 @dataclass(frozen=True)
 class StartOptions:
@@ -711,6 +764,7 @@ class StartOptions:
     dry_run: bool
     reuse_existing: bool
     recreate: bool
+    memory_capacity_only: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -733,7 +787,9 @@ class LLMStack:
 
     def __init__(self, config: AppConfig) -> None:
         self.config = config
+        self.preflight_checks = PreflightChecks(config.vllm_docker_image, run_command)
         self.models: dict[str, ModelDeployment] = {}
+        self.model_groups: dict[str, list[str]] = {}
         self.litellm_keep_alive: float | None = None
         self.litellm_debug: bool = False
         self.litellm_detailed_debug: bool = False
@@ -873,9 +929,15 @@ class LLMStack:
                 api_base_port=api_base_port,
                 litellm_params=params,
                 model_info=model_info,
-                context_length=require_model_int(model_name, model_info, "context_length"),
-                max_input_tokens=require_model_int(model_name, model_info, "max_input_tokens"),
-                max_output_tokens=require_model_int(model_name, model_info, "max_output_tokens"),
+                context_length=require_model_int(
+                    model_name, model_info, "context_length"
+                ),
+                max_input_tokens=require_model_int(
+                    model_name, model_info, "max_input_tokens"
+                ),
+                max_output_tokens=require_model_int(
+                    model_name, model_info, "max_output_tokens"
+                ),
                 gpu_memory_utilization=require_model_float(
                     model_name, model_info, "gpu_memory_utilization"
                 ),
@@ -889,6 +951,7 @@ class LLMStack:
                 allow_rebuild=allow_rebuild,
                 rebuild_key_present=rebuild_key_present,
             )
+            deployments[model_name].generation_settings()
 
         # Validate alias uniqueness
         seen_aliases: dict[str, str] = {}
@@ -903,6 +966,16 @@ class LLMStack:
                 seen_aliases[deployment.alias] = model_name
 
         self.models = deployments
+        try:
+            self.model_groups = load_groups(
+                cfg.get("model_groups", {}),
+                {name: model.alias for name, model in deployments.items()},
+                (*LITELLM_TARGETS, "all"),
+                LITELLM_TARGETS,
+            )
+        except ValueError as exc:
+            print(f"ERROR: {exc}")
+            sys.exit(1)
 
     # ------------------------------------------------------------------
     # Internal model helpers
@@ -950,24 +1023,6 @@ class LLMStack:
 
         raise RuntimeError(
             f"Model directory does not exist for '{model.name}': {explicit_path}"
-        )
-
-    def _find_free_port(self) -> int:
-        """Find a free vLLM port in the configured auto-port range.
-
-        Returns:
-            First available port number.
-
-        Raises:
-            RuntimeError: If no free ports available in range.
-        """
-        for p in range(self.config.vllm_auto_port_start, self.config.vllm_auto_port_end + 1):
-            if not port_in_use(p, self.config.vllm_bind_host) and not self._docker_port_in_use(p):
-                return p
-
-        raise RuntimeError(
-            f"No free ports available in range "
-            f"{self.config.vllm_auto_port_start}-{self.config.vllm_auto_port_end}"
         )
 
     # ------------------------------------------------------------------
@@ -1089,6 +1144,30 @@ class LLMStack:
             sys.exit(result.returncode)
 
         print(result.stdout.strip())
+        self._wait_for_stop(
+            f"Docker container {name}",
+            lambda: [
+                container
+                for container in self._docker_list_container_names(all_containers=False)
+                if container == name
+            ],
+        )
+
+    def _wait_for_stop(self, label: str, remaining: Callable[[], list[str]]) -> None:
+        """Confirm shutdown, failing explicitly if a service remains active."""
+        deadline = time.monotonic() + 10
+        while True:
+            active = remaining()
+            if not active:
+                print(f"Verified stopped: {label}")
+                return
+            if time.monotonic() >= deadline:
+                print(
+                    f"ERROR: {label} did not stop within 10 seconds; "
+                    f"still running: {', '.join(active)}"
+                )
+                sys.exit(1)
+            time.sleep(0.1)
 
     def _docker_remove_container(
         self,
@@ -1135,98 +1214,31 @@ class LLMStack:
 
         return result.stdout.strip() or None
 
-    def _host_nvidia_driver_version(self) -> str | None:
-        """Read host NVIDIA driver version from nvidia-smi (if available)."""
-        result = run_command(
-            ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
-            capture=True,
-        )
-
-        if result.returncode != 0:
-            return None
-
-        for line in result.stdout.splitlines():
-            candidate = line.strip()
-            if candidate:
-                return candidate
-
-        return None
-
-    def _preflight_check_nvidia_driver(self, *, dry_run: bool = False) -> None:
-        """Run a startup GPU/image compatibility probe and warn on failure.
-
-        Runs a lightweight GPU-enabled container probe before launching vLLM.
-        This catches common NVIDIA driver/image mismatches early with a
-        readable warning message.
-        """
-        command = [
-            "docker",
-            "run",
-            "--rm",
-            "--gpus",
-            "all",
-            "--entrypoint",
-            "python3",
-            self.config.vllm_docker_image,
-            "-c",
-            "import sys; sys.exit(0)",
-        ]
-
-        if dry_run:
-            print("Preflight check (dry-run): skipping NVIDIA compatibility probe.")
-            print("Would run:", " ".join(command))
-            return
-
-        result = run_command(command, capture=True)
-
-        if result.returncode == 0:
-            print("NVIDIA pre-run compatibility check passed.")
-            return
-
-        output_parts = [result.stdout.strip(), result.stderr.strip()]
-        output = "\n".join(part for part in output_parts if part)
-
-        print("WARNING: NVIDIA pre-run compatibility check failed.")
-        print(f"Docker image: {self.config.vllm_docker_image}")
-
-        mismatch = extract_nvidia_driver_mismatch(output)
-
-        if mismatch:
-            required, detected = mismatch
-            print(f"Required NVIDIA driver: >= {required}")
-            print(f"Detected NVIDIA driver: {detected}")
-        else:
-            host_driver = self._host_nvidia_driver_version()
-            if host_driver:
-                print(f"Detected NVIDIA driver: {host_driver}")
-
-        if output:
-            print()
-            print("Docker/NVIDIA output:")
-            print(output)
-
-        print()
-        print(
-            "Fix by selecting a compatible VLLM_DOCKER_IMAGE tag "
-            "or upgrading the host NVIDIA driver."
-        )
-        print("Startup will continue, but container launch may fail.")
-
     def _find_all_vllm_containers(self, model_name: str) -> list[str]:
         """Find all vLLM container names for a model (running and stopped)."""
         prefix = f"{VLLM_CONTAINER_PREFIX}{docker_safe_name(model_name)}-"
-        return [n for n in self._docker_list_container_names(all_containers=True) if n.startswith(prefix)]
+        return [
+            n
+            for n in self._docker_list_container_names(all_containers=True)
+            if n.startswith(prefix)
+        ]
 
     def _find_running_vllm_containers(self, model_name: str) -> list[str]:
         """Find running vLLM container names for a model."""
         prefix = f"{VLLM_CONTAINER_PREFIX}{docker_safe_name(model_name)}-"
-        return [n for n in self._docker_list_container_names(all_containers=False) if n.startswith(prefix)]
+        return [
+            n
+            for n in self._docker_list_container_names(all_containers=False)
+            if n.startswith(prefix)
+        ]
 
     # ------------------------------------------------------------------
     # Display helpers
     # ------------------------------------------------------------------
 
-    def _print_container_reuse_notice(self, container_name: str, model_name: str, port: int) -> None:
+    def _print_container_reuse_notice(
+        self, container_name: str, model_name: str, port: int
+    ) -> None:
         """Print a notice for reused containers."""
         print()
         print("=== Reusing existing vLLM container ===")
@@ -1261,7 +1273,9 @@ class LLMStack:
             print(f"    State: {state or 'unknown'}")
 
             if state == "running":
-                print(f"    Endpoint: http://{self.config.vllm_bind_host}:{port_str}/v1")
+                print(
+                    f"    Endpoint: http://{self.config.vllm_bind_host}:{port_str}/v1"
+                )
 
             print()
 
@@ -1282,13 +1296,19 @@ class LLMStack:
                 if state == "running":
                     running_count += 1
                     endpoint = f"http://{self.config.vllm_bind_host}:{port_str}/v1"
-                    print(f"✓ {model_name:<30} running    port {port_str}    {endpoint}")
+                    print(
+                        f"✓ {model_name:<30} running    port {port_str}    {endpoint}"
+                    )
                 else:
                     stopped_count += 1
-                    print(f"✗ {model_name:<30} {state or 'unknown':<10} port {port_str}")
+                    print(
+                        f"✗ {model_name:<30} {state or 'unknown':<10} port {port_str}"
+                    )
 
         print()
-        print(f"Total: {total} containers ({running_count} running, {stopped_count} stopped)")
+        print(
+            f"Total: {total} containers ({running_count} running, {stopped_count} stopped)"
+        )
         print()
 
     def list_models(self) -> None:
@@ -1301,7 +1321,6 @@ class LLMStack:
             "ipc",
             "quantization",
             "kv_cache_dtype",
-            "generation_config",
             "override_generation_config",
             "max_num_batched_tokens",
             "max_num_seqs",
@@ -1310,6 +1329,7 @@ class LLMStack:
             "compilation_config",
             "structured_outputs_config",
             "enable_prefix_caching",
+            "enable_chunked_prefill",
             "enforce_eager",
             "enable_auto_tool_choice",
             "reasoning_config",
@@ -1321,6 +1341,7 @@ class LLMStack:
 
         for model in self.models.values():
             raw_info = model.model_info
+            generation_config, _ = model.generation_settings()
             backend_served = backend_model_without_provider(model.backend_model)
 
             print(f"{model.name}")
@@ -1341,7 +1362,16 @@ class LLMStack:
             print(f"  max_input_tokens:         {model.max_input_tokens}")
             print(f"  max_output_tokens:        {model.max_output_tokens}")
             print(f"  gpu_memory_utilization:   {model.gpu_memory_utilization}")
-            print(f"  max_num_seqs:             {model.max_num_seqs or '(vLLM default)'}")
+            print(
+                f"  max_num_seqs:             {model.max_num_seqs or '(vLLM default)'}"
+            )
+            print(f"  generation_config:        {generation_config}")
+            sampling_info = format_sampling_parameters(
+                cast(dict[str, Any], raw_info.get("override_generation_config") or {}),
+                model.litellm_params,
+            )
+            if sampling_info:
+                print(f"  sampling_defaults:        {', '.join(sampling_info)}")
 
             for key in interesting_keys:
                 if key in raw_info:
@@ -1358,64 +1388,42 @@ class LLMStack:
 
             print()
 
-        aliases = [(m.alias, m.name, m.description) for m in self.models.values() if m.alias]
+        self.list_aliases_and_groups()
+
+    def list_aliases_and_groups(self) -> None:
+        """Print compact alias and ordered model-group tables."""
+        aliases = [
+            (m.alias, m.name, m.description) for m in self.models.values() if m.alias
+        ]
+        print(terminal_style("Aliases"))
+        print("-------")
         if aliases:
             col_alias = max(len(a) for a, _, _ in aliases)
             col_name = max(len(n) for _, n, _ in aliases)
-            print("Aliases")
-            print("-------")
             for alias, model_name, description in aliases:
                 desc_display = description or "(no description)"
-                print(f"  {alias:<{col_alias}}  →  {model_name:<{col_name}}  {desc_display}")
+                alias_display = terminal_style(f"{alias:<{col_alias}}", accent=True)
+                print(f"  {alias_display}  →  {model_name:<{col_name}}  {desc_display}")
             print()
+        else:
+            print("  (none configured)\n")
+
+        print(terminal_style("Model groups"))
+        print("------------")
+        if self.model_groups:
+            width = max(len(name) for name in self.model_groups)
+            for name, members in self.model_groups.items():
+                name_display = terminal_style(f"{name:<{width}}", accent=True)
+                print(f"  {name_display}  {', '.join(members)}")
+            print()
+        else:
+            print("  (none configured)\n")
 
     def generate_help(self) -> str:
-        """Generate dynamic help text."""
-        keys = [
-            "model_dir", "ipc", "quantization", "kv_cache_dtype", "generation_config",
-            "override_generation_config", "max_num_batched_tokens", "max_num_seqs",
-            "attention_backend", "attention_config", "enable_prefix_caching", "enforce_eager",
-            "compilation_config", "structured_outputs_config",
-            "reasoning_config",
-            "enable_auto_tool_choice", "tool_call_parser", "reasoning_parser",
-            "speculative_config", "license", "upstream",
-        ]
-
-        model_lines: list[str] = []
-
-        for model in self.models.values():
-            extras = [
-                f"{k}={model.model_info.get(k)}"
-                for k in keys
-                if k in model.model_info
-            ]
-            if model.license:
-                extras.append(f"license={model.license}")
-            if model.upstream:
-                extras.append(f"upstream={model.upstream}")
-
-            # Show alias if present
-            name_display = model.name
-            if model.alias:
-                name_display = f"{model.name} (alias: {model.alias})"
-
-            model_lines.append(
-                "    "
-                f"{name_display:<30} "
-                f"port={str(model.api_base_port):<5} "
-                f"context={str(model.context_length):<6} "
-                f"input={str(model.max_input_tokens):<6} "
-                f"output={str(model.max_output_tokens):<6} "
-                f"gpu_mem={model.gpu_memory_utilization} "
-                f"max_num_seqs={model.max_num_seqs or '(default)'} "
-                f"api_base={model.api_base} "
-                f"{' '.join(extras)}"
-            )
-
-        model_list = "\n".join(model_lines)
+        """Generate command help without dumping model runtime configuration."""
         prog = program_name()
 
-        return f"""
+        text = f"""
 {prog} — Unified LiteLLM + vLLM Launcher
 -------------------------------------------
 
@@ -1426,69 +1434,80 @@ Env:
   {self.config.env_file}
 
 Important:
-  Runtime values come from .env and config.yaml.
+  Runtime values come from env and config.yaml.
   Model aliases can be defined in config.yaml (model_info.alias) for shorter commands.
 
 Examples:
-  Show available (configured) models:
-  -----------------------------------
+  Show model aliases and groups:
+  ------------------------------
 
-  {prog} --list
+    {prog} --list
+
+    Run without arguments to show detailed model settings.
 
   Start models (model name or alias):
   -----------------------------------
 
-    {prog} mistral_7b --start                # start using model name
-    {prog} coder --start                     # start using alias (if configured)
-    {prog} mistral_7b --start --stream-log  # start and follow logs (stays attached)
-    {prog} mistral_7b --start --dry-run      # preview what would be done
-    {prog} mistral_7b --start --recreate     # force recreate container
+    {prog} {"mistral_7b --start":<42} # start using model name
+    {prog} {"coder --start":<42} # start using alias (if configured)
+    {prog} {"mistral_7b --start --stream-log":<42} # start and follow logs (stays attached)
+    {prog} {"mistral_7b --start --dry-run":<42} # preview what would be done
+    {prog} {"mistral_7b --start --recreate":<42} # force recreate container
+    {prog} {"mistral --start --startup-logs":<42} # bounded startup logs for one model
 
+  Batch startup:
+  --------------
+
+    {prog} {"mistral guard judge --start":<42} # sequential startup with bounded logs
+    {prog} {"--group rag --start":<42} # select a configured model group
+    {prog} {"--group rag --start --quiet":<42} # progress only; errors still show logs
+    {prog} {"--group rag --start --startup-timeout 600":<42} # readiness timeout per model (seconds)
+
+    Readiness timeout defaults to 900 seconds per model.
+    Groups use ordered lists under top-level model_groups in config.yaml.
+    All selected models are validated before any starts/stops.
+    Batch startup logs stop at HTTP readiness.
+    --follow/--stream-log: single-model only.
   View logs:
   ----------
 
-    {prog} mistral_7b --show-log             # show last 200 lines
-    {prog} mistral_7b --stream-log           # show and follow logs
-    {prog} mistral_7b --show-log --follow    # equivalent to --stream-log
+    {prog} {"mistral_7b --show-log":<42} # show last 200 lines
+    {prog} {"mistral_7b --stream-log":<42} # show and follow logs
+    {prog} {"mistral_7b --show-log --follow":<42} # equivalent to --stream-log
 
   Show log paths:
   ---------------
 
-    {prog} mistral_7b --show-log-path        # show Docker log file path
-    {prog} litellm --show-log-path           # show LiteLLM log directory + latest log
-    {prog} all --show-log-path               # show vLLM + LiteLLM log paths
-    {prog} all --show-log                    # shows paths for all logs
+    {prog} {"mistral_7b --show-log-path":<42} # show Docker log file path
+    {prog} {"litellm --show-log-path":<42} # show LiteLLM log directory + latest log
+    {prog} {"all --show-log-path":<42} # show vLLM + LiteLLM log paths
+    {prog} {"all --show-log":<42} # shows paths for all logs
 
   Clean logs:
   -----------
 
-    {prog} mistral_7b --clean-log            # truncate log file for one model
-    {prog} litellm --clean-log               # remove LiteLLM timestamped logs
-    {prog} all --clean-log                   # truncate vLLM + clean LiteLLM logs
+    {prog} {"mistral_7b --clean-log":<42} # truncate log file for one model
+    {prog} {"--group rag --clean-log":<42} # clean logs for selected group members
+    {prog} {"litellm --clean-log":<42} # remove LiteLLM timestamped logs
+    {prog} {"all --clean-log":<42} # truncate vLLM + clean LiteLLM logs
+
   Stop models:
   ------------
 
-  {prog} mistral_7b --stop
-  {prog} all --stop
-
-  Override runtime settings:
-  --------------------------
-
-  {prog} mistral_7b --start --max-num-seqs 1 --dry-run
-  {prog} mistral_7b --start --context-length 32768 --max-input-tokens 28672 --max-output-tokens 4096 --max-num-seqs 1 --dry-run
+    {prog} mistral_7b --stop
+    {prog} all --stop  # stop configured vLLM containers and LiteLLM
 
   LiteLLM proxy:
   --------------
 
-  {prog} litellm --start
+    {prog} litellm --start
     {prog} litellm --show-log
     {prog} litellm --show-log-path
     {prog} litellm --clean-log
-  {prog} litellm --stop
+    {prog} litellm --stop
 
-Current model values from LiteLLM config:
-{model_list}
 """
+        return style_help(text, prog)
 
     # ------------------------------------------------------------------
     # Log operations
@@ -1502,6 +1521,7 @@ Current model values from LiteLLM config:
         follow: bool = False,
         show_log_path: bool = False,
         since: str | None = None,
+        redact_values: tuple[str, ...] = (),
     ) -> None:
         """Show Docker logs for one container."""
         state = self._docker_container_state(container_name)
@@ -1527,7 +1547,7 @@ Current model values from LiteLLM config:
 
         command.append(container_name)
 
-        returncode = _stream_formatted_logs(command)
+        returncode = _stream_formatted_logs(command, redact_values=redact_values)
 
         if returncode != 0:
             print(f"ERROR: Failed to read logs for container: {container_name}")
@@ -1656,7 +1676,9 @@ Current model values from LiteLLM config:
         print(f"  state:    {state}")
         print(f"  logs_dir: {logs_dir}")
         print(f"  log_path: {log_path or '(none)'}")
-        print(f"  exists:   {'yes' if log_path is not None and log_path.exists() else 'no'}")
+        print(
+            f"  exists:   {'yes' if log_path is not None and log_path.exists() else 'no'}"
+        )
         print()
 
     def clean_litellm_logs(self, *, dry_run: bool = False) -> None:
@@ -1693,7 +1715,7 @@ Current model values from LiteLLM config:
             return
 
         if not safe_paths:
-            print("  Status:   ✗ Skipped — no managed LiteLLM log files found")
+            print("  Status:   ✓ Cleaned")
             print()
             return
 
@@ -1757,7 +1779,9 @@ Current model values from LiteLLM config:
             return
 
         if follow and len(containers) > 1:
-            print("ERROR: --follow can only be used when exactly one container matches.")
+            print(
+                "ERROR: --follow can only be used when exactly one container matches."
+            )
 
             for container in containers:
                 print(f"  {container}")
@@ -1858,15 +1882,25 @@ Current model values from LiteLLM config:
                     print(f"            Allowed root: {DOCKER_LOG_ROOT}")
                     continue
 
-                result = run_command(["sudo", "truncate", "-s", "0", log_path], capture=True)
+                result = run_command(
+                    ["sudo", "truncate", "-s", "0", log_path], capture=True
+                )
 
                 if result.returncode == 0:
                     state = self._docker_container_state(container)
                     print("  Status:   ✓ Cleaned")
                     if state == "running":
                         # docker logs caches the old EOF offset; restart resets the reader
-                        print(f"{_RED}  Warning:  'docker logs' won't show new entries until the container is restarted.{_RESET}")
-                        print(f"{_RED}            Run: docker restart {container}{_RESET}")
+                        print(
+                            "  Warning:  'docker logs' won't show new entries "
+                            "until the container is restarted."
+                        )
+                        print(
+                            terminal_style(
+                                f"            Run: docker restart {container}",
+                                code="1;33",
+                            )
+                        )
                 else:
                     print(f"  Status:   ✗ Failed - {result.stderr.strip()}")
 
@@ -1888,8 +1922,11 @@ Current model values from LiteLLM config:
         ipc_arg = docker_ipc_arg(raw_info.get("ipc"))
 
         command = [
-            "docker", "run", "-d",
-            "--name", f"vllm-{docker_safe_name(model.name)}-{port}",
+            "docker",
+            "run",
+            "-d",
+            "--name",
+            f"vllm-{docker_safe_name(model.name)}-{port}",
             "--runtime=nvidia",
             "--gpus=all",
         ]
@@ -1899,12 +1936,18 @@ Current model values from LiteLLM config:
 
         command.extend(
             [
-                "-p", f"{self.config.vllm_bind_host}:{port}:{self.config.vllm_container_port}",
-                "-v", self.config.vllm_model_volume,
-                "-v", self.config.vllm_cache_volume,
-                "-v", "/etc/timezone:/etc/timezone:ro",
-                "-v", "/etc/localtime:/etc/localtime:ro",
-                "-e", "VLLM_CONFIGURE_LOGGING=1",
+                "-p",
+                f"{self.config.vllm_bind_host}:{port}:{self.config.vllm_container_port}",
+                "-v",
+                self.config.vllm_model_volume,
+                "-v",
+                self.config.vllm_cache_volume,
+                "-v",
+                "/etc/timezone:/etc/timezone:ro",
+                "-v",
+                "/etc/localtime:/etc/localtime:ro",
+                "-e",
+                "VLLM_CONFIGURE_LOGGING=1",
                 self.config.vllm_docker_image,
                 # Some NVIDIA images export internal VLLM_* vars that newer vLLM
                 # versions don't recognize. Remove them for a clean startup.
@@ -1919,12 +1962,18 @@ Current model values from LiteLLM config:
                 "-u",
                 "-m",
                 "vllm.entrypoints.openai.api_server",
-                "--model", f"/models/{model_dir.name}",
-                "--served-model-name", model.name,
-                "--dtype", str(runtime.get("dtype", "auto")),
-                "--max-model-len", str(runtime["context_length"]),
-                "--gpu-memory-utilization", str(runtime["gpu_memory_utilization"]),
-                "--host", "0.0.0.0",
+                "--model",
+                f"/models/{model_dir.name}",
+                "--served-model-name",
+                model.name,
+                "--dtype",
+                str(runtime.get("dtype", "auto")),
+                "--max-model-len",
+                str(runtime["context_length"]),
+                "--gpu-memory-utilization",
+                str(runtime["gpu_memory_utilization"]),
+                "--host",
+                "0.0.0.0",
             ]
         )
 
@@ -1947,6 +1996,13 @@ Current model values from LiteLLM config:
         if as_bool(raw_info.get("enable_prefix_caching", False)):
             command.append("--enable-prefix-caching")
 
+        if raw_info.get("enable_chunked_prefill") is not None:
+            command.append(
+                "--enable-chunked-prefill"
+                if as_bool(raw_info["enable_chunked_prefill"])
+                else "--no-enable-chunked-prefill"
+            )
+
         if raw_info.get("attention_backend"):
             command.extend(["--attention-backend", str(raw_info["attention_backend"])])
 
@@ -1964,13 +2020,10 @@ Current model values from LiteLLM config:
                     config_value = json.dumps(config_value, separators=(",", ":"))
                 command.extend([f"--{config_key.replace('_', '-')}", config_value])
 
-        if raw_info.get("generation_config"):
-            command.extend(["--generation-config", str(raw_info["generation_config"])])
-
-        # Note: Sampling parameters (temperature, top_p, top_k, repetition_penalty, etc.)
-        # are request-time parameters in vLLM, not server startup parameters.
-        # They should be passed in API requests, not as command-line flags.
-        # The parameters from config.yaml are used for display/documentation only.
+        generation_config, generation_overrides_arg = model.generation_settings()
+        command.extend(["--generation-config", generation_config])
+        if generation_overrides_arg is not None:
+            command.extend(["--override-generation-config", generation_overrides_arg])
 
         if raw_info.get("quantization"):
             command.extend(["--quantization", str(raw_info["quantization"])])
@@ -2042,7 +2095,9 @@ Current model values from LiteLLM config:
 
         if speculative_config:
             if not isinstance(speculative_config, str):
-                speculative_config = json.dumps(speculative_config, separators=(",", ":"))
+                speculative_config = json.dumps(
+                    speculative_config, separators=(",", ":")
+                )
             command.extend(["--speculative-config", speculative_config])
 
         api_key = model.api_key or os.environ.get("LOCAL_VLLM_API_KEY", "")
@@ -2083,31 +2138,66 @@ Current model values from LiteLLM config:
         print(f"Max input tokens:          {runtime['max_input_tokens']}")
         print(f"Max output tokens:         {runtime['max_output_tokens']}")
         print(f"GPU memory utilization:    {runtime['gpu_memory_utilization']}")
-        print(f"Max num batched tokens:    {raw_info.get('max_num_batched_tokens', '(vLLM default)')}")
-        print(f"Max num seqs:              {runtime.get('max_num_seqs', '(vLLM default)')}")
+        print(
+            f"Max num batched tokens:    {raw_info.get('max_num_batched_tokens', '(vLLM default)')}"
+        )
+        print(
+            f"Max num seqs:              {runtime.get('max_num_seqs', '(vLLM default)')}"
+        )
         print(f"Data type:                 {runtime.get('dtype', 'auto')}")
-        print(f"Enforce eager:             {as_bool(raw_info.get('enforce_eager', False))}")
-        print(f"Trust remote code:         {as_bool(raw_info.get('trust_remote_code', False))}")
-        print(f"Enable prefix caching:     {as_bool(raw_info.get('enable_prefix_caching', False))}")
-        print(f"Attention backend:         {raw_info.get('attention_backend', '(default)')}")
-        print(f"Attention config:          {raw_info.get('attention_config', '(none)')}")
-        print(f"Compilation config:        {raw_info.get('compilation_config', '(none)')}")
-        print(f"Structured outputs config: {raw_info.get('structured_outputs_config', '(none)')}")
-        print(f"Generation config:         {raw_info.get('generation_config', '(model default)')}")
+        print(
+            f"Enforce eager:             {as_bool(raw_info.get('enforce_eager', False))}"
+        )
+        print(
+            f"Trust remote code:         {as_bool(raw_info.get('trust_remote_code', False))}"
+        )
+        print(
+            f"Enable prefix caching:     {as_bool(raw_info.get('enable_prefix_caching', False))}"
+        )
+        print(
+            "Chunked prefill:           "
+            f"{raw_info.get('enable_chunked_prefill', '(vLLM default)')}"
+        )
+        print(
+            f"Attention backend:         {raw_info.get('attention_backend', '(default)')}"
+        )
+        print(
+            f"Attention config:          {raw_info.get('attention_config', '(none)')}"
+        )
+        print(
+            f"Compilation config:        {raw_info.get('compilation_config', '(none)')}"
+        )
+        print(
+            f"Structured outputs config: {raw_info.get('structured_outputs_config', '(none)')}"
+        )
+        generation_config, _ = model.generation_settings()
+        print(f"Generation config:         {generation_config}")
 
         # Show sampling parameters
-        override_gen_config = cast(dict[str, Any], raw_info.get('override_generation_config') or {})
+        override_gen_config = cast(
+            dict[str, Any], raw_info.get("override_generation_config") or {}
+        )
         litellm_params = model.litellm_params or {}
         sampling_info = format_sampling_parameters(override_gen_config, litellm_params)
 
         if sampling_info:
             print(f"Sampling parameters:       {', '.join(sampling_info)}")
 
-        print(f"Auto tool choice:          {as_bool(raw_info.get('enable_auto_tool_choice', False))}")
-        print(f"Reasoning config:          {raw_info.get('reasoning_config', '(none)')}")
-        print(f"Tool call parser:          {raw_info.get('tool_call_parser', '(none)')}")
-        print(f"Reasoning parser:          {raw_info.get('reasoning_parser', '(none)')}")
-        print(f"Speculative config:        {raw_info.get('speculative_config', '(none)')}")
+        print(
+            f"Auto tool choice:          {as_bool(raw_info.get('enable_auto_tool_choice', False))}"
+        )
+        print(
+            f"Reasoning config:          {raw_info.get('reasoning_config', '(none)')}"
+        )
+        print(
+            f"Tool call parser:          {raw_info.get('tool_call_parser', '(none)')}"
+        )
+        print(
+            f"Reasoning parser:          {raw_info.get('reasoning_parser', '(none)')}"
+        )
+        print(
+            f"Speculative config:        {raw_info.get('speculative_config', '(none)')}"
+        )
         print(f"Quantization:              {raw_info.get('quantization', '(none)')}")
         print(f"KV cache dtype:            {raw_info.get('kv_cache_dtype', '(auto)')}")
         print()
@@ -2149,12 +2239,18 @@ Current model values from LiteLLM config:
         container_name = f"vllm-{docker_safe_name(model.name)}-{options.port}"
 
         if model.api_base_host and model.api_base_host != self.config.vllm_host:
-            print("WARNING: api_base host does not match VLLM_HOST from .env")
+            print("WARNING: api_base host does not match VLLM_HOST from env")
             print(f"  api_base host: {model.api_base_host}")
             print(f"  VLLM_HOST:     {self.config.vllm_host}")
             print()
 
         existing_state = self._docker_container_state(container_name)
+        reuse_stopped_container = (
+            existing_state is not None
+            and existing_state != "running"
+            and options.reuse_existing
+            and not options.recreate
+        )
 
         if existing_state is not None:
             print()
@@ -2174,27 +2270,19 @@ Current model values from LiteLLM config:
             elif existing_state == "running":
                 print(f"Container already running: {container_name}")
                 print("No duplicate vLLM instance will be started.")
-                self._print_container_reuse_notice(container_name, model.name, options.port)
+                self._print_container_reuse_notice(
+                    container_name, model.name, options.port
+                )
                 return
 
             elif options.reuse_existing:
                 print(f"Container exists but is not running: {container_name}")
                 print("Reusing it by starting the existing container.")
 
-                if not options.dry_run and (
-                    port_in_use(options.port, self.config.vllm_bind_host)
-                    or self._docker_port_in_use(options.port)
-                ):
-                    print(f"ERROR: Port {options.port} is already in use on {self.config.vllm_bind_host}")
-                    sys.exit(1)
-
-                self._preflight_check_nvidia_driver(dry_run=options.dry_run)
-                self._docker_start_container(container_name, dry_run=options.dry_run)
-                self._print_container_reuse_notice(container_name, model.name, options.port)
-                return
-
             else:
-                print(f"ERROR: Container already exists but is not running: {container_name}")
+                print(
+                    f"ERROR: Container already exists but is not running: {container_name}"
+                )
                 print(f"Use --recreate or docker start {container_name}")
                 sys.exit(1)
 
@@ -2202,15 +2290,47 @@ Current model values from LiteLLM config:
             port_in_use(options.port, self.config.vllm_bind_host)
             or self._docker_port_in_use(options.port)
         ):
-            print(f"ERROR: Port {options.port} is already in use on {self.config.vllm_bind_host}")
+            print(
+                f"ERROR: Port {options.port} is already in use on {self.config.vllm_bind_host}"
+            )
             sys.exit(1)
 
-        self._preflight_check_nvidia_driver(dry_run=options.dry_run)
-        command = self._build_vllm_command(model, model_dir, options.port, options.runtime)
-        self._print_vllm_start_summary(model, model_dir, options.port, options.runtime, command)
+        gpu_memory_utilization = options.runtime.get("gpu_memory_utilization")
+        if not isinstance(gpu_memory_utilization, (int, float)):
+            print("ERROR: Missing valid GPU memory utilization for preflight.")
+            sys.exit(1)
+        if options.memory_capacity_only:
+            self.preflight_checks.check_gpu_memory(
+                [model.name],
+                gpu_memory_utilization,
+                dry_run=options.dry_run,
+                capacity_only=True,
+            )
+        else:
+            self.preflight_checks.check_gpu_memory(
+                [model.name], gpu_memory_utilization, dry_run=options.dry_run
+            )
+        self.preflight_checks.check_nvidia_driver(dry_run=options.dry_run)
+        if reuse_stopped_container:
+            self._docker_start_container(container_name, dry_run=options.dry_run)
+            self._print_container_reuse_notice(container_name, model.name, options.port)
+            return
+
+        command = self._build_vllm_command(
+            model, model_dir, options.port, options.runtime
+        )
+        self._print_vllm_start_summary(
+            model, model_dir, options.port, options.runtime, command
+        )
 
         if not options.dry_run:
-            start_background_process(command)
+            # docker run -d is bounded: wait for container creation, not model loading.
+            result = run_command(command)
+            if result.returncode != 0:
+                print(f"ERROR: Docker launch failed for {container_name}")
+                print(result.stderr.strip())
+                sys.exit(result.returncode)
+            print(result.stdout.strip())
 
     def stop_vllm(self, model_name: str, *, dry_run: bool = False) -> None:
         """Stop running vLLM containers for one model.
@@ -2244,6 +2364,10 @@ Current model values from LiteLLM config:
 
         print("\nStopped:")
         print(result.stdout.strip())
+        self._wait_for_stop(
+            f"vLLM model {model_name}",
+            partial(self._find_running_vllm_containers, model_name),
+        )
 
     def stop_all_vllm(self, *, dry_run: bool = False) -> None:
         """Stop all running vLLM containers for configured models.
@@ -2282,6 +2406,14 @@ Current model values from LiteLLM config:
 
         print("\nStopped:")
         print(result.stdout.strip())
+        self._wait_for_stop(
+            "all configured vLLM models",
+            lambda: [
+                container
+                for model_name in self.models
+                for container in self._find_running_vllm_containers(model_name)
+            ],
+        )
 
     # ------------------------------------------------------------------
     # LiteLLM lifecycle
@@ -2332,7 +2464,9 @@ Current model values from LiteLLM config:
             )
             return
 
-        log_level = "DEBUG" if (self.litellm_debug or self.litellm_detailed_debug) else "INFO"
+        log_level = (
+            "DEBUG" if (self.litellm_debug or self.litellm_detailed_debug) else "INFO"
+        )
         keep_alive_export = (
             f"export AIOHTTP_KEEPALIVE_TIMEOUT={self.litellm_keep_alive:g} && "
             if self.litellm_keep_alive is not None
@@ -2353,7 +2487,7 @@ Current model values from LiteLLM config:
             f"source {self.config.litellm_venv_activate} && "
             # litellm CLI does bare `from proxy_server import` which only works when
             # the proxy package directory is on PYTHONPATH
-            f"export PYTHONPATH=\"$(python -c 'import litellm,os;print(os.path.dirname(litellm.__file__)+\"/proxy\")')\" && "
+            f'export PYTHONPATH="$(python -c \'import litellm,os;print(os.path.dirname(litellm.__file__)+"/proxy")\')" && '
             f"{self.config.litellm_bin} --config {self.config.litellm_config} "
             f"--host {self.config.litellm_bind_host} "
             f"--port {self.config.litellm_port}{debug_flag}"
@@ -2374,18 +2508,33 @@ Current model values from LiteLLM config:
 
         # Display configured models with their sampling parameters
         print("Configured models:")
+        name_width = max((len(name) for name in self.models), default=0)
+        alias_width = max(
+            (
+                len(f"(alias: {model.alias})") if model.alias else 0
+                for model in self.models.values()
+            ),
+            default=0,
+        )
         for model_name, model in self.models.items():
             raw_info = model.model_info
-            override_gen_config = cast(dict[str, Any], raw_info.get('override_generation_config') or {})
+            override_gen_config = cast(
+                dict[str, Any], raw_info.get("override_generation_config") or {}
+            )
             litellm_params = model.litellm_params or {}
-            sampling_parts = format_sampling_parameters(override_gen_config, litellm_params)
+            sampling_parts = format_sampling_parameters(
+                override_gen_config, litellm_params
+            )
 
-            alias_str = f" (alias: {model.alias})" if model.alias else ""
+            alias_str = f"(alias: {model.alias})" if model.alias else ""
             sampling_str = f" [{', '.join(sampling_parts)}]" if sampling_parts else ""
-            print(f"  - {model_name}{alias_str}{sampling_str}")
+            print(
+                f"  - {model_name:<{name_width}} "
+                f"{alias_str:<{alias_width}}{sampling_str}".rstrip()
+            )
 
         print()
-        print("Command:", command)
+        print("LiteLLM command:", command)
 
         if not dry_run:
             if follow_log:
@@ -2446,7 +2595,9 @@ Current model values from LiteLLM config:
                 for index, token in enumerate(argv):
                     if token == "-m" and index + 1 < len(argv):
                         module_name = argv[index + 1]
-                        if module_name == "litellm" or module_name.startswith("litellm."):
+                        if module_name == "litellm" or module_name.startswith(
+                            "litellm."
+                        ):
                             return True
 
             return False
@@ -2528,6 +2679,41 @@ Current model values from LiteLLM config:
             sys.exit(1)
 
         print("\nLiteLLM stop signal sent.")
+        self._wait_for_stop(
+            "LiteLLM",
+            lambda: [pid for pid in self._find_litellm_pids() if pid != my_pid],
+        )
+
+    def _start_litellm_for_batch(self, *, dry_run: bool, recreate: bool) -> None:
+        """Reuse this config's LiteLLM process, or explicitly restart it."""
+        if recreate:
+            self.stop_litellm(dry_run=dry_run)
+            if dry_run:
+                print("Dry run only. LiteLLM would be started after the stop.")
+                return
+
+            deadline = time.monotonic() + 10
+            while any(pid != str(os.getpid()) for pid in self._find_litellm_pids()):
+                if time.monotonic() >= deadline:
+                    raise StartupError("LiteLLM did not stop within 10 seconds")
+                time.sleep(0.1)
+        else:
+            pids = [pid for pid in self._find_litellm_pids() if pid != str(os.getpid())]
+            if pids:
+                print(
+                    "Reusing running LiteLLM for this configuration "
+                    f"(PID(s): {', '.join(pids)}); configuration is not reloaded."
+                )
+                return
+
+        if port_in_use(self.config.litellm_port, self.config.litellm_bind_host):
+            raise StartupError(
+                f"LiteLLM port {self.config.litellm_port} is already in use on "
+                f"{self.config.litellm_bind_host}; no matching LiteLLM process "
+                "is available for reuse"
+            )
+
+        self.start_litellm(dry_run=dry_run)
 
     # ------------------------------------------------------------------
     # CLI handlers
@@ -2535,38 +2721,15 @@ Current model values from LiteLLM config:
 
     def _resolve_runtime_settings(
         self,
-        args: argparse.Namespace,
         model: ModelDeployment,
     ) -> dict[str, int | float | str | None]:
-        """Resolve runtime settings from config.yaml plus explicit CLI overrides.
-
-        Combines default settings from model configuration with any CLI overrides
-        specified by the user. Validates that settings are within acceptable ranges.
-        """
+        """Read and validate vLLM runtime settings from config.yaml."""
         context_length = model.context_length
         max_input_tokens = model.max_input_tokens
         max_output_tokens = model.max_output_tokens
         gpu_memory_utilization = model.gpu_memory_utilization
         max_num_seqs = model.max_num_seqs
         dtype = model.dtype
-
-        if args.context_length is not None:
-            context_length = args.context_length
-
-        if args.max_input_tokens is not None:
-            max_input_tokens = args.max_input_tokens
-
-        if args.max_output_tokens is not None:
-            max_output_tokens = args.max_output_tokens
-
-        if args.gpu_memory_utilization is not None:
-            gpu_memory_utilization = args.gpu_memory_utilization
-
-        if args.max_num_seqs is not None:
-            max_num_seqs = args.max_num_seqs
-
-        if args.dtype is not None:
-            dtype = args.dtype
 
         if context_length < 1:
             print("ERROR: context_length must be >= 1")
@@ -2614,7 +2777,9 @@ Current model values from LiteLLM config:
             return False
 
         if not args.model:
-            print("ERROR: --show-log/--show-log-path/--clean-log requires MODEL_NAME or all")
+            print(
+                "ERROR: --show-log/--show-log-path/--clean-log requires MODEL_NAME or all"
+            )
             sys.exit(1)
 
         target = args.model.lower()
@@ -2628,7 +2793,9 @@ Current model values from LiteLLM config:
                 self.show_litellm_log_path()
                 return True
 
-            self.show_litellm_logs(tail=args.tail, follow=args.follow, show_log_path=False)
+            self.show_litellm_logs(
+                tail=args.tail, follow=args.follow, show_log_path=False
+            )
             return True
 
         if target == "all":
@@ -2665,7 +2832,9 @@ Current model values from LiteLLM config:
             print(f"  {program_name()} {target} --start --show-log")
             sys.exit(1)
 
-        self.show_vllm_logs(resolved, tail=args.tail, follow=args.follow, show_log_path=False)
+        self.show_vllm_logs(
+            resolved, tail=args.tail, follow=args.follow, show_log_path=False
+        )
         return True
 
     def handle_ps(self, args: argparse.Namespace) -> bool:
@@ -2681,6 +2850,13 @@ Current model values from LiteLLM config:
 
         if target == "all":
             self.show_all_container_status()
+            return True
+        if target in LITELLM_TARGETS:
+            pids = self._find_litellm_pids()
+            print("\n=== LiteLLM Status ===\n")
+            print(f"LiteLLM: {'running' if pids else 'stopped'}")
+            if pids:
+                print(f"  PID(s): {', '.join(pids)}")
             return True
 
         resolved = self._resolve_model_name(args.model)
@@ -2705,6 +2881,7 @@ Current model values from LiteLLM config:
         target = args.model.lower()
 
         if target == "all":
+            self.stop_litellm(dry_run=args.dry_run)
             self.stop_all_vllm(dry_run=args.dry_run)
             return True
 
@@ -2722,6 +2899,270 @@ Current model values from LiteLLM config:
         self.stop_vllm(resolved, dry_run=args.dry_run)
         return True
 
+    def _select_models(self, args: argparse.Namespace) -> list[str]:
+        """Resolve the entire selection before any lifecycle or log operation."""
+        names = getattr(args, "models", None) or ([args.model] if args.model else [])
+
+        def _resolve_target(name: str) -> str | None:
+            if name.lower() in LITELLM_TARGETS:
+                return "litellm"
+            return self._resolve_model_name(name)
+
+        return select_models(
+            names,
+            getattr(args, "group", None),
+            self.model_groups,
+            _resolve_target,
+            ("all",),
+        )
+
+    def _batch_start_plan(
+        self,
+        args: argparse.Namespace,
+        selected: list[ModelDeployment],
+    ) -> list[tuple[ModelDeployment, StartOptions, BackendHandle]]:
+        """Validate every model before starting or recreating any containers."""
+        if not selected:
+            return []
+        plan: list[tuple[ModelDeployment, StartOptions, BackendHandle]] = []
+        models_to_start: list[ModelDeployment] = []
+        recreating_running_model = False
+        ports: set[int] = set()
+        for model in selected:
+            runtime = self._resolve_runtime_settings(model)
+            port = model.api_base_port
+            if port is None or not 1 <= port <= 65535:
+                raise ValueError(
+                    f"No valid port configured in litellm_params.api_base for {model.name}"
+                )
+            if port in ports:
+                raise ValueError(f"Duplicate backend port {port} in selected models")
+            ports.add(port)
+            if args.recreate and not model.allow_rebuild:
+                raise ValueError(
+                    f"--recreate requires top-level rebuild: true for {model.name}"
+                )
+            model_dir = self._find_model_dir(model, dry_run=args.dry_run)
+            self._build_vllm_command(model, model_dir, port, runtime)
+            container = f"vllm-{docker_safe_name(model.name)}-{port}"
+            state = self._docker_container_state(container)
+            if (
+                state is not None
+                and state != "running"
+                and args.no_reuse_existing
+                and not args.recreate
+            ):
+                raise ValueError(
+                    f"{container} already exists; use --recreate or allow reuse"
+                )
+            if args.recreate and state == "running":
+                recreating_running_model = True
+            elif state != "running":
+                models_to_start.append(model)
+            if (
+                not args.dry_run
+                and state != "running"
+                and (
+                    port_in_use(port, self.config.vllm_bind_host)
+                    or self._docker_port_in_use(port)
+                )
+            ):
+                raise ValueError(f"Port {port} is already in use")
+            host = self.config.vllm_bind_host
+            if host in ("0.0.0.0", "::"):
+                host = "127.0.0.1" if host == "0.0.0.0" else "::1"
+            if ":" in host:
+                host = f"[{host}]"
+            options = StartOptions(
+                port=port,
+                runtime=runtime,
+                dry_run=args.dry_run,
+                reuse_existing=not args.no_reuse_existing,
+                recreate=args.recreate,
+            )
+            plan.append(
+                (
+                    model,
+                    options,
+                    BackendHandle(container, f"http://{host}:{port}/health"),
+                )
+            )
+        total = sum(model.gpu_memory_utilization for model in selected)
+        print(f"Selected GPU memory fractions: {total:.2f} (not a guarantee of fit).")
+        if total > 1:
+            print("WARNING: Combined configured GPU memory fractions exceed 1.0.")
+        if (
+            len(models_to_start) > 1
+            and not recreating_running_model
+            and not args.recreate
+        ):
+            self.preflight_checks.check_gpu_memory(
+                [model.name for model in models_to_start],
+                sum(model.gpu_memory_utilization for model in models_to_start),
+                dry_run=args.dry_run,
+            )
+        return plan
+
+    def _run_batch(self, args: argparse.Namespace) -> None:
+        """Dispatch validated model selections without recursively invoking the CLI."""
+        try:
+            selected = self._select_models(args)
+            selected_models = [
+                self.models[name] for name in selected if name != "litellm"
+            ]
+            if args.recreate and not args.start:
+                raise ValueError(
+                    "--recreate requires --start; use --start --recreate "
+                    "to recreate the selected model containers"
+                )
+            actions = sum(
+                bool(getattr(args, key))
+                for key in (
+                    "start",
+                    "stop",
+                    "ps",
+                    "show_log_path",
+                    "clean_log",
+                )
+            )
+            if actions == 0 and args.show_log:
+                actions = 1
+            if actions != 1 or (
+                args.show_log
+                and not args.start
+                and (args.stop or args.ps or args.show_log_path or args.clean_log)
+            ):
+                raise ValueError(
+                    "Select exactly one batch action: --start, --start --recreate, "
+                    "--stop, --ps, --show-log, --show-log-path, or --clean-log"
+                )
+            if args.follow:
+                raise ValueError(
+                    "Batch commands cannot follow logs indefinitely; startup logs end "
+                    "at readiness. Use MODEL --stream-log separately."
+                )
+            if not args.start and (
+                args.quiet or args.startup_logs or args.wait_for_startup
+            ):
+                raise ValueError(
+                    "--quiet, --startup-logs and --startup-timeout require --start"
+                )
+            plan = self._batch_start_plan(args, selected_models) if args.start else []
+        except (ValueError, RuntimeError) as exc:
+            print(f"ERROR: {exc}")
+            sys.exit(1)
+        if not args.start:
+            for target in selected:
+                if target == "litellm":
+                    label = "LiteLLM"
+                else:
+                    model = self.models[target]
+                    label = f"{model.alias or model.name} ({model.name})"
+                print(f"\n=== {label} ===")
+                per_model = copy.copy(args)
+                per_model.model = target
+                if args.stop:
+                    self.handle_stop(per_model)
+                elif args.ps:
+                    self.handle_ps(per_model)
+                else:
+                    self.handle_logs(per_model)
+            return
+        model_jobs = {
+            model.name: (model, options, backend) for model, options, backend in plan
+        }
+        if args.recreate and selected_models:
+            running_containers = [
+                container
+                for model in selected_models
+                for container in self._find_running_vllm_containers(model.name)
+            ]
+            print("\n=== Stopping selected backends before recreation ===")
+            for container in running_containers:
+                self._docker_stop_container(container, dry_run=args.dry_run)
+            capacity_only = args.dry_run and bool(running_containers)
+            memory_kwargs = {"capacity_only": True} if capacity_only else {}
+            self.preflight_checks.check_gpu_memory(
+                [model.name for model in selected_models],
+                sum(model.gpu_memory_utilization for model in selected_models),
+                dry_run=args.dry_run,
+                **memory_kwargs,
+            )
+            if capacity_only:
+                model_jobs = {
+                    name: (model, replace(options, memory_capacity_only=True), backend)
+                    for name, (model, options, backend) in model_jobs.items()
+                }
+        jobs: list[StartupJob] = []
+        for target in selected:
+            if target == "litellm":
+                jobs.append(
+                    StartupJob(
+                        name="litellm",
+                        label="LiteLLM",
+                        port=None,
+                        backend=None,
+                        launch=partial(
+                            self._start_litellm_for_batch,
+                            dry_run=args.dry_run,
+                            recreate=args.recreate,
+                        ),
+                        reused=False,
+                        secrets=(),
+                        monitor=False,
+                    )
+                )
+                continue
+            model, options, backend = model_jobs[target]
+            jobs.append(
+                StartupJob(
+                    name=model.name,
+                    label=model.alias or model.name,
+                    port=options.port,
+                    backend=backend,
+                    launch=partial(self.start_vllm, model, options),
+                    reused=not args.recreate
+                    and self._docker_container_state(backend.container) is not None,
+                    secrets=(model.api_key, os.environ.get("LOCAL_VLLM_API_KEY", "")),
+                )
+            )
+        exit_code = run_startup(
+            jobs,
+            timeout=args.startup_timeout,
+            quiet=args.quiet,
+            dry_run=args.dry_run,
+            program=program_name(),
+            format_line=_format_log_line,
+            diagnose=self._show_startup_failure_logs,
+        )
+        if exit_code:
+            sys.exit(exit_code)
+        if not args.dry_run and selected_models:
+            if args.group is not None or len(args.models) > 1:
+                print(
+                    "\nTo keep following logs after group/batch startup, "
+                    "run a separate command for the model you want:"
+                )
+            else:
+                print("\nTo keep following this model's logs, run:")
+            for model in selected_models:
+                print(
+                    f"  {program_name()} {shlex.quote(model.alias or model.name)} "
+                    "--stream-log"
+                )
+
+    def _show_startup_failure_logs(self, job: StartupJob) -> None:
+        """Show diagnostics only if Docker created a container for this launch."""
+        if job.backend is None:
+            self.show_litellm_logs(tail="100", follow=False, show_log_path=False)
+            return
+        if self._docker_container_state(job.backend.container) is not None:
+            self.show_container_logs(
+                job.backend.container,
+                tail="100",
+                redact_values=job.secrets,
+            )
+
     def run(self, args: argparse.Namespace) -> None:
         """Dispatch a parsed argument namespace to the appropriate operation.
 
@@ -2731,6 +3172,20 @@ Current model values from LiteLLM config:
         Safety: All destructive operations require explicit flags and respect
         dry-run mode. Default behavior is conservative (reuse, don't recreate).
         """
+        if (
+            getattr(args, "group", None) is not None
+            or len(getattr(args, "models", [])) > 1
+            or getattr(args, "startup_logs", False)
+            or getattr(args, "quiet", False)
+            or getattr(args, "wait_for_startup", False)
+        ):
+            self.load_models()
+            if args.help:
+                print(self.generate_help())
+                return
+            self._run_batch(args)
+            return
+
         # Handle litellm target
         if args.model and args.model.lower() in LITELLM_TARGETS:
             if args.recreate:
@@ -2745,7 +3200,9 @@ Current model values from LiteLLM config:
 
             if args.stop:
                 if args.show_log or args.follow:
-                    print("ERROR: --show-log, --follow, and --stream-log are not allowed with --stop")
+                    print(
+                        "ERROR: --show-log, --follow, and --stream-log are not allowed with --stop"
+                    )
                     sys.exit(1)
                 self.stop_litellm(dry_run=args.dry_run)
                 return
@@ -2759,7 +3216,9 @@ Current model values from LiteLLM config:
                 return
 
             if args.show_log:
-                self.show_litellm_logs(tail=args.tail, follow=args.follow, show_log_path=False)
+                self.show_litellm_logs(
+                    tail=args.tail, follow=args.follow, show_log_path=False
+                )
                 return
 
             print(
@@ -2775,11 +3234,13 @@ Current model values from LiteLLM config:
             return
 
         if args.list:
-            self.list_models()
+            self.list_aliases_and_groups()
             return
 
         if args.stop and (args.show_log or args.follow):
-            print("ERROR: --show-log, --follow, and --stream-log are not allowed with --stop")
+            print(
+                "ERROR: --show-log, --follow, and --stream-log are not allowed with --stop"
+            )
             sys.exit(1)
 
         if self.handle_logs(args):
@@ -2823,26 +3284,21 @@ Current model values from LiteLLM config:
             sys.exit(1)
 
         model = self.models[resolved]
-        runtime = self._resolve_runtime_settings(args, model)
-
-        if args.auto_port:
-            port = self._find_free_port()
-        elif args.port is not None:
-            port = args.port
-        else:
-            port = model.api_base_port
-
-            if port is None:
-                print(f"ERROR: No port found in LiteLLM config for model {model.name}")
-                print("Use --port PORT or add api_base with a port to LiteLLM config.")
-                sys.exit(1)
+        runtime = self._resolve_runtime_settings(model)
+        port = model.api_base_port
+        if port is None:
+            print(f"ERROR: No port found in LiteLLM config for model {model.name}")
+            print("Configure a port in litellm_params.api_base in config.yaml.")
+            sys.exit(1)
 
         if port < 1 or port > 65535:
             print(f"ERROR: Invalid port: {port}")
             sys.exit(1)
 
         if args.start:
-            log_since = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            log_since = datetime.datetime.now(datetime.timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
             self.start_vllm(
                 model,
                 StartOptions(
@@ -2853,6 +3309,16 @@ Current model values from LiteLLM config:
                     recreate=args.recreate,
                 ),
             )
+
+            if not args.show_log and not args.dry_run:
+                print(
+                    "\nTo see loading progress and keep following logs, "
+                    "add --stream-log to this single-model start command."
+                )
+                print(
+                    f"Or follow logs now: {program_name()} "
+                    f"{shlex.quote(args.model)} --stream-log"
+                )
 
             if args.show_log and not args.dry_run:
                 container_name = f"vllm-{docker_safe_name(model.name)}-{port}"
@@ -2892,17 +3358,28 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawTextHelpFormatter,
     )
 
-    parser.add_argument("model", nargs="?")
-    parser.add_argument("--port", type=int)
-    parser.add_argument("--auto-port", action="store_true")
-    parser.add_argument("--context-length", type=int)
-    parser.add_argument("--max-input-tokens", type=int)
-    parser.add_argument("--max-output-tokens", type=int)
-    parser.add_argument("--gpu-memory-utilization", type=float)
-    parser.add_argument("--max-num-seqs", type=int)
-    parser.add_argument("--dtype", type=str)
-
-    parser.add_argument("--start", action="store_true", help="Start the model container")
+    parser.add_argument("models", nargs="*", metavar="MODEL")
+    parser.add_argument(
+        "--group", help="Select an ordered model_groups entry from config.yaml"
+    )
+    parser.add_argument(
+        "--startup-logs",
+        action="store_true",
+        help="Wait for readiness with bounded startup logs (also for one model)",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress routine batch startup logs, not failure diagnostics",
+    )
+    parser.add_argument(
+        "--startup-timeout",
+        type=float,
+        help="Readiness timeout per model in seconds (default: 900)",
+    )
+    parser.add_argument(
+        "--start", action="store_true", help="Start the model container"
+    )
     parser.add_argument("--stop", action="store_true", help="Stop the model container")
     parser.add_argument("--ps", action="store_true", help="Show container status")
     parser.add_argument("--recreate", action="store_true")
@@ -2913,7 +3390,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Show logs (for 'all': show vLLM + LiteLLM log paths)",
     )
-    parser.add_argument("--stream-log", action="store_true", help="Show and follow logs (equivalent to --show-log --follow)")
+    parser.add_argument(
+        "--stream-log",
+        action="store_true",
+        help="Show and follow logs (equivalent to --show-log --follow)",
+    )
     parser.add_argument(
         "--show-log-path",
         action="store_true",
@@ -2924,14 +3405,31 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Clean/truncate log files (Docker + LiteLLM)",
     )
-    parser.add_argument("--follow", "-f", action="store_true", help="Follow log output (use with --show-log or use --stream-log)")
+    parser.add_argument(
+        "--follow",
+        "-f",
+        action="store_true",
+        help="Follow log output (use with --show-log or use --stream-log)",
+    )
     parser.add_argument("--tail", default="200")
 
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--list", action="store_true")
+    parser.add_argument(
+        "--list", action="store_true", help="List model aliases and groups"
+    )
     parser.add_argument("--help", action="store_true")
 
-    args = parser.parse_args()
+    args = parser.parse_intermixed_args()
+    args.model = args.models[0] if args.models else None
+    args.wait_for_startup = args.startup_timeout is not None
+    if args.startup_timeout is None:
+        args.startup_timeout = 900
+    if args.group is not None and args.models:
+        parser.error("--group cannot be combined with positional models")
+    if not 0 < args.startup_timeout < float("inf"):
+        parser.error("--startup-timeout must be finite and greater than zero")
+    if args.quiet and args.startup_logs:
+        parser.error("--quiet and --startup-logs are mutually exclusive")
 
     if args.stream_log and args.show_log:
         parser.error("--stream-log is mutually exclusive with --show-log")

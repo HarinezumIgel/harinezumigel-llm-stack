@@ -78,29 +78,29 @@ fi
 
 echo
 echo "7. Checking file permissions..."
-if [ -x "harinezumigel-llm-stack.py" ] && [ -x "install.sh" ]; then
+if [ -x "src/harinezumigel-llm-stack.py" ] && [ -x "install.sh" ]; then
     echo -e "${GREEN}✓${NC} Script files are executable"
 else
     echo -e "${YELLOW}⚠${NC} Some scripts may not be executable"
-    echo "  Run: chmod +x harinezumigel-llm-stack.py install.sh"
+    echo "  Run: chmod +x src/harinezumigel-llm-stack.py install.sh"
 fi
 
 echo
-echo "8. Checking for .env files..."
-if [ -f ".env" ]; then
-    echo -e "${RED}⚠ .env file present - this should NOT be committed!${NC}"
+echo "8. Checking for env files..."
+if [ -f "env" ] || [ -f "config/env" ] || [ -f ".env" ] || [ -f "config/.env" ]; then
+    echo -e "${RED}⚠ env file present - this should NOT be committed!${NC}"
     ((ISSUES_FOUND++))
 else
-    echo -e "${GREEN}✓ No .env file (good - only .env.example should exist)${NC}"
+    echo -e "${GREEN}✓ No env file present (only config/env.example should exist)${NC}"
 fi
 
 echo
 echo "9. Checking .gitignore..."
 if [ -f ".gitignore" ]; then
-    if grep -q "^\.env$" .gitignore; then
-        echo -e "${GREEN}✓ .gitignore properly excludes .env files${NC}"
+    if grep -qxF '/config/env' .gitignore; then
+        echo -e "${GREEN}✓ .gitignore properly excludes env files${NC}"
     else
-        echo -e "${YELLOW}⚠ .gitignore might not exclude .env files${NC}"
+        echo -e "${YELLOW}⚠ .gitignore might not exclude env files${NC}"
     fi
 else
     echo -e "${RED}⚠ No .gitignore file found${NC}"
@@ -109,7 +109,7 @@ fi
 
 echo
 echo "10. Checking for required files..."
-REQUIRED_FILES=("harinezumigel-llm-stack.py" "README.md" "LICENSE" ".gitignore" ".env.example" "config.yaml.example")
+REQUIRED_FILES=("src/harinezumigel-llm-stack.py" "README.md" "LICENSE" ".gitignore" "config/env.example" "config/config.yaml.example")
 for file in "${REQUIRED_FILES[@]}"; do
     if [ -f "$file" ]; then
         echo -e "${GREEN}✓${NC} $file exists"
@@ -142,7 +142,7 @@ else
     echo "Some warnings may be acceptable (e.g., examples in documentation)."
     echo
     echo "Critical items to fix:"
-    echo "  - Remove any .env files"
+    echo "  - Remove any env files"
     echo "  - Remove hardcoded API keys, passwords, tokens"
     echo "  - Review and sanitize file paths"
     echo

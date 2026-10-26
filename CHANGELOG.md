@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- Grouped recreation stops all running containers for selected backends before
+  checking the combined new memory budget. Dry-runs leave them running and
+  explicitly distinguish total-capacity previews from post-stop availability.
+- GB10 memory preflight uses shared system memory (`MemAvailable` / `MemTotal`)
+  when NVIDIA GPU memory counters are unavailable, for both starts and dry runs.
+- The installer now backs up legacy config files instead of copying them into
+  active paths, initializes missing active configs from current examples, and
+  reports exact backup paths. Fresh installs clearly report when no old config
+  needed backing up.
+- Omitted `model_info.generation_config` now explicitly selects `vllm`, rather
+  than inheriting model generation defaults through vLLM's `auto` default.
+  Set `auto` explicitly to retain the previous behavior; recreate backend
+  containers to apply changed startup defaults.
+- Sampling defaults in the example configuration and README Mistral sample now
+  live in `model_info.override_generation_config`, not `litellm_params`.
+  Qwen3.5 uses the selected repetition penalty of `1.0` and an integer `top_k: -1`.
+- Duplicate parameters in `litellm_params` and
+  `model_info.override_generation_config` are rejected during configuration
+  loading. Summaries identify backend and proxy defaults explicitly.
+- `--list` now prints compact alias and model-group tables only; invocation
+  without arguments retains detailed model settings.
+- `--help` no longer includes the model runtime-values dump; command examples
+  and usage guidance remain.
+
+### Added
+- Shared terminal styling across lifecycle commands and batch startup, including
+  readiness/failure summaries; raw backend log output is left unchanged.
+- Theme-aware ANSI styling for help and alias/group listings, automatically
+  disabled for redirected output, unset/dumb terminals, and `NO_COLOR`.
+- Multiple positional model names/aliases and ordered `model_groups` selections
+  through `--group`, including status, stop, and finite log operations.
+- Sequential batch startup with full selection preflight, HTTP readiness checks,
+  bounded live startup logs, automatic failure diagnostics, and final summaries.
+- `--startup-timeout`, `--startup-logs` for single-model opt-in, and `--quiet`;
+  batch streaming conflicts fail before launch.
+- Regression coverage for readiness, failure, interruption, and follower cleanup.
+
+### Changed
+- Removed CLI overrides for backend ports and vLLM runtime settings. Configure
+  ports in `litellm_params.api_base` and runtime settings in `model_info` in
+  `config.yaml`; request-level sampling overrides remain supported.
+- Removed the CLI auto-port range settings from the example environment.
+- Group resolution and bounded startup monitoring live in focused sibling modules.
+  Installation checks their presence; renamed and symlinked commands resolve them
+  relative to the source script.
+
 ## [10/21/2026 Revision 66]
 
 ### Changed
@@ -26,7 +75,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - `harinezumigel-llm-stack.py`: LiteLLM configuration is always read from `INSTALLED_BASE / "config.yaml"`; `LITELLM_CONFIG` is no longer required or used as an environment override
-- `harinezumigel-llm-stack.py`: installation paths now use `INSTALLED_BASE` (`/opt/litellm`); environment-file paths are constructed where needed, while retaining the `HLS_ENV_FILE` override
+- `harinezumigel-llm-stack.py`: installation paths use `INSTALLED_BASE` (`/opt/litellm`), with deployment settings in `/opt/litellm/config/env`
 - `harinezumigel-llm-stack.py`: all operations abort at script startup if the installation directory is missing, before environment loading
 - LiteLLM logs now use only `/opt/litellm/logs`; the directory is created when needed, except during dry runs and cleanup. Cleanup checks for the directory before removing `.log` files and leaves outside files untouched; symlinks are not followed
 - `install.sh`: LiteLLM setup no longer force-pins `fastapi<0.115.0` and `sse-starlette<2.0.0`; it now relies on `litellm[proxy]` dependency resolution and validates with `pip check`
@@ -188,7 +237,7 @@ First stable release with core functionality and comprehensive documentation.
 
 If you were using a pre-release version:
 
-1. **Environment file location**: Ensure `.env` is at `/opt/litellm/.env` or set `HLS_ENV_FILE`
+1. **Environment file location**: Ensure deployment settings are at `/opt/litellm/config/env`
 2. **Config.yaml structure**: Verify `model_info` section includes required fields:
    - `context_length`
    - `max_input_tokens`

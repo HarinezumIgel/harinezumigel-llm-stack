@@ -37,6 +37,8 @@ ENV/
 
 # Configuration (contains secrets)
 .env
+/config/env
+/old_configs/
 *.local
 config.yaml
 
@@ -58,3 +60,7 @@ htmlcov/
 # Deployment
 push-to-github.sh
 deploy.py
+/src/fix_settings.py
+/src/check_all_models.py
+/tests/test_check_all_models.py
+/TUNING.md

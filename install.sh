@@ -12,7 +12,7 @@ echo "This script will:"
 echo "  1. Check that Python 3, Docker, and NVIDIA GPU are installed"
 echo "  2. Install PyYAML (required for YAML config parsing)"
 echo "  3. Create /opt/litellm directory structure"
-echo "  4. Copy example configuration files (.env and config.yaml)"
+echo "  4. Copy example configuration files (env and config.yaml)"
 echo "  5. Create a symlink for easy command-line access"
 echo "  6. Provide next steps for completing setup"
 echo
@@ -21,11 +21,34 @@ echo
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+TURQUOISE=$'\033[0;36m'
+PROMPT_RESET=$'\033[0m'
 NC='\033[0m' # No Color
 
 # Configuration
 INSTALL_DIR="/opt/litellm"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+RUNTIME_MODULES=(
+    hls_preflight.py
+    hls_selection.py
+    hls_startup.py
+    hls_terminal.py
+    harinezumigel-llm-stack.py
+)
+for module in "${RUNTIME_MODULES[@]}"; do
+    if [[ ! -f "$SCRIPT_DIR/src/$module" ]]; then
+        echo "Error: Missing $SCRIPT_DIR/src/$module. Install from the complete repository."
+        exit 1
+    fi
+done
+
+for config_file in env.example config.yaml.example; do
+    if [[ ! -f "$SCRIPT_DIR/config/$config_file" ]]; then
+        echo "Error: Missing $SCRIPT_DIR/config/$config_file. Install from the complete repository."
+        exit 1
+    fi
+done
 
 # Check if running as root
 if [[ $EUID -eq 0 ]]; then
@@ -85,7 +108,7 @@ else
     echo -e "${YELLOW}⚠${NC} nvidia-smi not found or no GPUs detected"
     echo "  This is required for GPU acceleration with vLLM models"
     echo "  Without GPU, you can only run CPU-based models (very slow)"
-    read -p "Continue anyway? [y/N] " -n 1 -r
+    read -p "${TURQUOISE}Continue anyway? [y/N] ${PROMPT_RESET}" -n 1 -r
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         echo "Aborted. Please install NVIDIA drivers and nvidia-smi first."
@@ -164,15 +187,15 @@ echo
 echo "Setting up /opt/litellm directory structure..."
 if [[ -d "$INSTALL_DIR" ]]; then
     echo -e "${YELLOW}⚠${NC} Directory $INSTALL_DIR already exists"
-    echo "  Existing .env and config.yaml will be backed up (with date) and overwritten."
-    read -p "Continue? [y/N] " -n 1 -r
+    echo "  Existing config files will be backed up (with date) before replacement."
+    read -p "${TURQUOISE}Continue? [y/N] ${PROMPT_RESET}" -n 1 -r
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         echo "Aborted."
         exit 1
     fi
 else
-    read -p "Create $INSTALL_DIR? [y/N] " -n 1 -r
+    read -p "${TURQUOISE}Create $INSTALL_DIR? [y/N] ${PROMPT_RESET}" -n 1 -r
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         echo "Aborted."
@@ -192,48 +215,102 @@ echo
 echo "Copying example configuration files to $INSTALL_DIR..."
 echo
 
-_bak_date=$(date +%Y%m%d_%H%M%S)
-if [[ -f "$SCRIPT_DIR/.env.example" ]]; then
-    read -p "Copy .env.example to $INSTALL_DIR/.env? [y/N] " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        if [[ -f "$INSTALL_DIR/.env" ]]; then
-            echo "  Backing up existing .env to .env_${_bak_date}.bak ..."
-            cp "$INSTALL_DIR/.env" "$INSTALL_DIR/.env_${_bak_date}.bak"
-            echo -e "${GREEN}✓${NC} Backed up to $INSTALL_DIR/.env_${_bak_date}.bak"
+CONFIG_DIR="$INSTALL_DIR/config"
+BACKUP_DIR="$INSTALL_DIR/old_configs"
+mkdir -p "$CONFIG_DIR"
+CONFIG_BACKUPS=()
+BACKED_UP_SOURCES=()
+
+backup_config() {
+    local source="$1"
+    local backup
+
+    local backed_up_source
+    for backed_up_source in "${BACKED_UP_SOURCES[@]}"; do
+        if [[ "$backed_up_source" == "$source" ]]; then
+            return
         fi
-        cp "$SCRIPT_DIR/.env.example" "$INSTALL_DIR/.env"
-        echo -e "${GREEN}✓${NC} Created $INSTALL_DIR/.env"
+    done
+
+    mkdir -p -m 700 "$BACKUP_DIR"
+    backup=$(mktemp "$BACKUP_DIR/$(basename "$source")_$(date +%Y%m%d_%H%M%S).XXXXXX.bak")
+    cp "$source" "$backup"
+    CONFIG_BACKUPS+=("$backup")
+    BACKED_UP_SOURCES+=("$source")
+}
+
+report_config_backups() {
+    echo "Previous configuration backups:"
+    if [[ ${#CONFIG_BACKUPS[@]} -eq 0 ]]; then
+        echo "  None; no existing configuration files needed backing up."
+        return
+    fi
+    local backup
+    for backup in "${CONFIG_BACKUPS[@]}"; do
+        echo "  $backup"
+    done
+}
+
+# Preserve legacy configurations as backups; initialize the new layout from
+# current examples instead of treating an older schema as a ready-to-use config.
+for legacy_env in "$CONFIG_DIR/.env" "$INSTALL_DIR/env" "$INSTALL_DIR/.env"; do
+    if [[ -f "$legacy_env" ]]; then
+        backup_config "$legacy_env"
+    fi
+done
+if [[ -f "$INSTALL_DIR/config.yaml" ]]; then
+    backup_config "$INSTALL_DIR/config.yaml"
+fi
+
+if [[ -s "$SCRIPT_DIR/config/env.example" ]]; then
+    if [[ -s "$CONFIG_DIR/env" ]]; then
+        read -p "${TURQUOISE}Copy config/env.example to $CONFIG_DIR/env? [y/N] ${PROMPT_RESET}" -n 1 -r
+        echo
+    else
+        echo "  Missing or empty env; initializing it from config/env.example."
+        REPLY=y
+    fi
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        if [[ -f "$CONFIG_DIR/env" ]]; then
+            backup_config "$CONFIG_DIR/env"
+        fi
+        cp "$SCRIPT_DIR/config/env.example" "$CONFIG_DIR/env"
+        echo -e "${GREEN}✓${NC} Created $CONFIG_DIR/env"
         echo "  → You must edit this file with your paths and API keys"
         echo "  → IMPORTANT: Set VLLM_DOCKER_IMAGE to a tag that matches your NVIDIA driver"
         echo "  → Check with: nvidia-smi (Driver Version), then see README.md"
-        echo "  → Run: ${YELLOW}nano $INSTALL_DIR/.env${NC} (or your preferred editor)"
+        echo "  → Run: ${YELLOW}nano $CONFIG_DIR/env${NC} (or your preferred editor)"
     else
-        echo "  Skipping .env."
+        echo "  Skipping env."
     fi
 else
-    echo -e "${YELLOW}⚠${NC} .env.example not found in $SCRIPT_DIR — skipping"
+    echo -e "${RED}Error: config/env.example is missing or empty in $SCRIPT_DIR.${NC}"
+    exit 1
 fi
 echo
 
-if [[ -f "$SCRIPT_DIR/config.yaml.example" ]]; then
-    read -p "Copy config.yaml.example to $INSTALL_DIR/config.yaml? [y/N] " -n 1 -r
-    echo
+if [[ -s "$SCRIPT_DIR/config/config.yaml.example" ]]; then
+    if [[ -s "$CONFIG_DIR/config.yaml" ]]; then
+        read -p "${TURQUOISE}Copy config/config.yaml.example to $CONFIG_DIR/config.yaml? [y/N] ${PROMPT_RESET}" -n 1 -r
+        echo
+    else
+        echo "  Missing or empty config.yaml; initializing it from config/config.yaml.example."
+        REPLY=y
+    fi
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-        if [[ -f "$INSTALL_DIR/config.yaml" ]]; then
-            echo "  Backing up existing config.yaml to config.yaml_${_bak_date}.bak ..."
-            cp "$INSTALL_DIR/config.yaml" "$INSTALL_DIR/config.yaml_${_bak_date}.bak"
-            echo -e "${GREEN}✓${NC} Backed up to $INSTALL_DIR/config.yaml_${_bak_date}.bak"
+        if [[ -f "$CONFIG_DIR/config.yaml" ]]; then
+            backup_config "$CONFIG_DIR/config.yaml"
         fi
-        cp "$SCRIPT_DIR/config.yaml.example" "$INSTALL_DIR/config.yaml"
-        echo -e "${GREEN}✓${NC} Created $INSTALL_DIR/config.yaml"
+        cp "$SCRIPT_DIR/config/config.yaml.example" "$CONFIG_DIR/config.yaml"
+        echo -e "${GREEN}✓${NC} Created $CONFIG_DIR/config.yaml"
         echo "  → You must edit this file to configure your models"
-        echo "  → Run: ${YELLOW}nano $INSTALL_DIR/config.yaml${NC} (or your preferred editor)"
+        echo "  → Run: ${YELLOW}nano $CONFIG_DIR/config.yaml${NC} (or your preferred editor)"
     else
         echo "  Skipping config.yaml."
     fi
 else
-    echo -e "${YELLOW}⚠${NC} config.yaml.example not found in $SCRIPT_DIR — skipping"
+    echo -e "${RED}Error: config/config.yaml.example is missing or empty in $SCRIPT_DIR.${NC}"
+    exit 1
 fi
 echo
 
@@ -243,6 +320,14 @@ echo "Step 5: Creating Command Symlink"
 echo "=================================="
 echo
 echo "Creating symlink for easy command-line access..."
+mkdir -p "$INSTALL_DIR/src"
+for module in "${RUNTIME_MODULES[@]}"; do
+    if [[ "$SCRIPT_DIR/src/$module" -ef "$INSTALL_DIR/src/$module" ]]; then
+        continue
+    fi
+    install -m 644 "$SCRIPT_DIR/src/$module" "$INSTALL_DIR/src/$module"
+done
+chmod +x "$INSTALL_DIR/src/harinezumigel-llm-stack.py"
 SYMLINK_PATH="$HOME/.local/bin/harinezumigel-llm-stack"
 mkdir -p "$HOME/.local/bin"
 
@@ -252,7 +337,7 @@ if [[ -L "$SYMLINK_PATH" ]]; then
 elif [[ -f "$SYMLINK_PATH" ]]; then
     echo -e "${YELLOW}⚠${NC} A regular file (not a symlink) already exists at $SYMLINK_PATH"
     echo "  This may be an existing installation or an unrelated file."
-    read -p "  Delete it and replace with a symlink? [y/N] " -n 1 -r
+    read -p "${TURQUOISE}  Delete it and replace with a symlink? [y/N] ${PROMPT_RESET}" -n 1 -r
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         echo "Aborted. Please remove $SYMLINK_PATH manually and re-run."
@@ -261,10 +346,10 @@ elif [[ -f "$SYMLINK_PATH" ]]; then
     rm -f "$SYMLINK_PATH"
 fi
 
-echo "  Creating symlink: $SCRIPT_DIR/harinezumigel-llm-stack.py → $SYMLINK_PATH"
-ln -s "$SCRIPT_DIR/harinezumigel-llm-stack.py" "$SYMLINK_PATH"
-chmod +x "$SCRIPT_DIR/harinezumigel-llm-stack.py"
+echo "  Creating symlink: $INSTALL_DIR/src/harinezumigel-llm-stack.py → $SYMLINK_PATH"
+ln -s "$INSTALL_DIR/src/harinezumigel-llm-stack.py" "$SYMLINK_PATH"
 echo -e "${GREEN}✓${NC} Created symlink: $SYMLINK_PATH"
+echo "  Runtime modules are installed in $INSTALL_DIR/src; the checkout is not needed to run the command."
 echo
 
 # Check if ~/.local/bin is in PATH
@@ -282,7 +367,7 @@ echo
 
 # Create LiteLLM virtual environment
 echo "=================================="
-echo "Step 6: LiteLLM Virtual Environment Setup (Optional)"
+echo "Step 6: LiteLLM Virtual Environment Setup"
 echo "=================================="
 echo
 echo "LiteLLM requires a Python virtual environment with 'litellm[proxy]' and prisma."
@@ -332,6 +417,7 @@ install_litellm_proxy_deps() {
     return 0
 }
 
+CREATE_VENV=false
 if [[ -d "$VENV_PATH" ]]; then
     echo
     echo -e "${GREEN}✓${NC} Found existing virtual environment at $VENV_PATH"
@@ -339,9 +425,9 @@ if [[ -d "$VENV_PATH" ]]; then
     echo "This step will:"
     echo "  • Use the existing virtual environment"
     echo "  • Install/upgrade litellm[proxy] package (this may take a few minutes)"
-    echo "  • Configure the .env file with the venv activation path"
+    echo "  • Configure the env file with the venv activation path"
     echo
-    read -p "Use existing virtual environment and install/upgrade litellm? [y/N] " -n 1 -r
+    read -p "${TURQUOISE}Use existing virtual environment and install/upgrade litellm? [y/N] ${PROMPT_RESET}" -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         echo
@@ -350,13 +436,22 @@ if [[ -d "$VENV_PATH" ]]; then
         echo "Installing/upgrading litellm[proxy] package..."
         echo "This may take a few minutes. Please wait..."
         echo
-        if install_litellm_proxy_deps "$VENV_PATH" "upgrade"; then
-            echo
-            echo "Updating .env with venv activation path..."
+        if ! install_litellm_proxy_deps "$VENV_PATH" "upgrade"; then
+            echo -e "${RED}Error: Failed to upgrade LiteLLM. Setup aborted.${NC}"
+            exit 1
         fi
     else
-        echo "Skipping virtual environment setup."
-        echo "The existing virtual environment at $VENV_PATH will remain unchanged."
+        echo "Reinstalling will replace $VENV_PATH; the old environment will be retained."
+        read -p "${TURQUOISE}Reinstall the LiteLLM virtual environment? [y/N] (No aborts setup) ${PROMPT_RESET}" -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            echo "Aborted. The existing virtual environment remains unchanged."
+            exit 1
+        fi
+        VENV_BACKUP=$(mktemp -d "$INSTALL_DIR/venv_backup_$(date +%Y%m%d_%H%M%S).XXXXXX")
+        mv "$VENV_PATH" "$VENV_BACKUP/venv"
+        echo "Previous environment retained at $VENV_BACKUP/venv"
+        CREATE_VENV=true
     fi
 else
     echo
@@ -365,48 +460,60 @@ else
     echo "This step will:"
     echo "  • Create a new virtual environment at $VENV_PATH"
     echo "  • Install litellm[proxy] package (this may take a few minutes)"
-    echo "  • Configure the .env file with the venv activation path"
+    echo "  • Configure the env file with the venv activation path"
     echo
-    echo "You can skip this step and set it up manually later if you prefer."
+    echo "Declining creation will abort setup."
     echo
-    read -p "Create LiteLLM virtual environment now? [y/N] " -n 1 -r
+    read -p "${TURQUOISE}Create LiteLLM virtual environment now? [y/N] ${PROMPT_RESET}" -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-        echo
-        echo "Creating virtual environment at $VENV_PATH..."
-        if python3 -m venv "$VENV_PATH"; then
-            echo -e "${GREEN}✓${NC} Virtual environment created successfully"
-            echo
-            echo "Installing litellm[proxy] package..."
-            echo "This may take a few minutes. Please wait..."
-            echo
-            if install_litellm_proxy_deps "$VENV_PATH" "install"; then
-                echo
-                echo "Updating .env with venv activation path..."
-                if grep -q "^LITELLM_VENV_ACTIVATE=" "$INSTALL_DIR/.env" 2>/dev/null; then
-                    sed -i.bak "s|^LITELLM_VENV_ACTIVATE=.*|LITELLM_VENV_ACTIVATE=$VENV_PATH/bin/activate|" "$INSTALL_DIR/.env"
-                    if [[ -f "$INSTALL_DIR/.env.bak" ]]; then
-                        rm "$INSTALL_DIR/.env.bak"
-                    fi
-                else
-                    echo "LITELLM_VENV_ACTIVATE=$VENV_PATH/bin/activate" >> "$INSTALL_DIR/.env"
-                fi
-                echo -e "${GREEN}✓${NC} .env file updated with venv path"
-            else
-                echo -e "${RED}✗${NC} Failed to install litellm[proxy]"
-                echo "  You can install it manually later with:"
-                echo "  source $VENV_PATH/bin/activate && pip install 'litellm[proxy]'"
-            fi
-        else
-            echo -e "${RED}✗${NC} Failed to create virtual environment"
-            echo "  You can create it manually later with:"
-            echo "  python3 -m venv $VENV_PATH"
-        fi
+        CREATE_VENV=true
     else
-        echo "Skipping virtual environment setup."
-        echo "You can create it manually later (see next steps below)."
+        echo "Aborted. A LiteLLM virtual environment is required."
+        exit 1
     fi
 fi
+
+if [[ "$CREATE_VENV" == true ]]; then
+    echo "Creating virtual environment at $VENV_PATH..."
+    if ! python3 -m venv "$VENV_PATH"; then
+        echo -e "${RED}Error: Failed to create virtual environment. Setup aborted.${NC}"
+        exit 1
+    fi
+    if ! install_litellm_proxy_deps "$VENV_PATH" "install"; then
+        echo -e "${RED}Error: Failed to install LiteLLM. Setup aborted.${NC}"
+        exit 1
+    fi
+fi
+
+echo "Updating env with virtual environment paths..."
+ENV_PATHS_CHANGE=false
+for setting in LITELLM_VENV_ACTIVATE LITELLM_BIN; do
+    if [[ "$setting" == LITELLM_VENV_ACTIVATE ]]; then
+        value="$VENV_PATH/bin/activate"
+    else
+        value="$VENV_PATH/bin/litellm"
+    fi
+    if ! grep -Fqx "$setting=$value" "$CONFIG_DIR/env"; then
+        ENV_PATHS_CHANGE=true
+    fi
+done
+if [[ "$ENV_PATHS_CHANGE" == true ]]; then
+    backup_config "$CONFIG_DIR/env"
+fi
+for setting in LITELLM_VENV_ACTIVATE LITELLM_BIN; do
+    if [[ "$setting" == LITELLM_VENV_ACTIVATE ]]; then
+        value="$VENV_PATH/bin/activate"
+    else
+        value="$VENV_PATH/bin/litellm"
+    fi
+    if grep -q "^$setting=" "$CONFIG_DIR/env"; then
+        sed -i "s|^$setting=.*|$setting=$value|" "$CONFIG_DIR/env"
+    else
+        printf '%s=%s\n' "$setting" "$value" >> "$CONFIG_DIR/env"
+    fi
+done
+echo -e "${GREEN}✓${NC} config/env updated with activation and LiteLLM executable paths"
 echo
 
 # Summary
@@ -418,27 +525,27 @@ echo "The harinezumigel-llm-stack has been installed successfully."
 echo "You still need to complete the following setup steps:"
 echo
 echo "1. Edit configuration files:"
-echo "   • $INSTALL_DIR/.env      (paths, API keys, Docker image)"
-echo "   • $INSTALL_DIR/config.yaml (model definitions)"
+echo "   • $CONFIG_DIR/env      (paths, API keys, Docker image)"
+echo "   • $CONFIG_DIR/config.yaml (model definitions)"
 echo "   • Ensure VLLM_DOCKER_IMAGE is compatible with your NVIDIA driver"
 echo
 echo "2. Set up model directory:"
 echo "   • Download your models to a directory"
-echo "   • Update MODEL_ROOT in .env to point to that directory"
+echo "   • Update MODEL_ROOT in env to point to that directory"
 echo
 if [[ ! -d "$INSTALL_DIR/venv" ]]; then
 echo "3. Set up LiteLLM virtual environment (skipped above):"
 echo "   • Create venv: python3 -m venv /opt/litellm/venv"
 echo "   • Activate:      source /opt/litellm/venv/bin/activate"
 echo "   • Install:       pip install 'litellm[proxy]' prisma"
-echo "   • Update LITELLM_VENV_ACTIVATE in .env"
+echo "   • Update LITELLM_VENV_ACTIVATE in env"
 echo
 fi
-VLLM_IMAGE=$(grep '^VLLM_DOCKER_IMAGE=' "$INSTALL_DIR/.env" 2>/dev/null | cut -d= -f2)
+VLLM_IMAGE=$(grep '^VLLM_DOCKER_IMAGE=' "$CONFIG_DIR/env" 2>/dev/null | cut -d= -f2)
 VLLM_IMAGE=${VLLM_IMAGE:-nvcr.io/nvidia/vllm:latest}
 echo "4. Verify NVIDIA driver and image compatibility:"
 echo "   nvidia-smi | grep 'Driver Version'"
-echo "   grep '^VLLM_DOCKER_IMAGE=' $INSTALL_DIR/.env"
+echo "   grep '^VLLM_DOCKER_IMAGE=' $CONFIG_DIR/env"
 echo
 echo "5. Pull vLLM Docker image:"
 echo "   docker pull $VLLM_IMAGE"
@@ -457,12 +564,10 @@ echo
 open_config_in_editor() {
     local target_file="$1"
 
-    if [[ ! -e "$target_file" ]]; then
-        echo -e "${YELLOW}⚠${NC} File not found, creating: $target_file"
-        if ! touch "$target_file"; then
-            echo -e "${RED}✗${NC} Could not create $target_file"
-            return 1
-        fi
+    if [[ ! -s "$target_file" ]]; then
+        echo -e "${RED}Error: Configuration file is missing or empty: $target_file${NC}"
+        echo "Re-run install.sh to initialize it from the example configuration."
+        return 1
     fi
 
     if [[ "${EDITOR:-nano}" == "nano" ]]; then
@@ -474,23 +579,31 @@ open_config_in_editor() {
 
 # Offer to open editor
 echo "Would you like to edit the configuration files now?"
-echo -e "${YELLOW}⚠ Note: the next file is named .env (dot-env), not venv or .venv.${NC}"
+echo -e "${YELLOW}⚠ Note: the next file is config/env (no leading dot), not venv or .venv.${NC}"
 echo
-read -p "Open .env file for editing? [y/N] " -n 1 -r
+read -p "${TURQUOISE}Open env file for editing? [y/N] ${PROMPT_RESET}" -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-    open_config_in_editor "$INSTALL_DIR/.env"
+    open_config_in_editor "$CONFIG_DIR/env"
 fi
 
 echo
-read -p "Open config.yaml file for editing? [y/N] " -n 1 -r
+read -p "${TURQUOISE}Open config.yaml file for editing? [y/N] ${PROMPT_RESET}" -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-    open_config_in_editor "$INSTALL_DIR/config.yaml"
+    open_config_in_editor "$CONFIG_DIR/config.yaml"
 fi
 
 echo
+if [[ ! -s "$CONFIG_DIR/env" || ! -s "$CONFIG_DIR/config.yaml" ]]; then
+    echo -e "${RED}Error: Configuration files are missing or empty. Setup is incomplete.${NC}"
+    exit 1
+fi
 echo -e "${GREEN}Setup complete!${NC}"
 echo "Next: Edit configs, download models, pull Docker image, then run 'harinezumigel-llm-stack --list'"
 echo
-echo -e "${RED}Did you update $INSTALL_DIR/.env to match your LLM setup?${NC}"
+echo -e "${RED}Did you update $CONFIG_DIR/env to match your LLM setup?${NC}"
+echo -e "${RED}Did you replace the example LITELLM_BIND_HOST=192.168.100.50 in $CONFIG_DIR/env with an IP assigned to your target host (or confirm it is already correct)?${NC}"
+echo -e "${RED}Did you configure $CONFIG_DIR/config.yaml for your models?${NC}"
+echo
+report_config_backups

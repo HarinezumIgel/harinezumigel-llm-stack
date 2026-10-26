@@ -26,22 +26,58 @@ from contextlib import redirect_stderr, redirect_stdout
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-# Add the script directory to Python path
-SCRIPT_DIR = Path(__file__).parent
+# Add the source directory to Python path
+PROJECT_DIR = Path(__file__).resolve().parent.parent
+SCRIPT_DIR = PROJECT_DIR / "src"
 sys.path.insert(0, str(SCRIPT_DIR))
 
 # Import the main script as a module
 # Using importlib to handle the file with dashes in the name
 spec = importlib.util.spec_from_file_location(
-    "harinezumigel_llm_stack",
-    SCRIPT_DIR / "harinezumigel-llm-stack.py"
+    "harinezumigel_llm_stack", SCRIPT_DIR / "harinezumigel-llm-stack.py"
 )
 if spec is None or spec.loader is None:
     raise RuntimeError("Failed to load harinezumigel-llm-stack.py module spec")
 
 harinezumigel_llm_stack = importlib.util.module_from_spec(spec)
 sys.modules["harinezumigel_llm_stack"] = harinezumigel_llm_stack
-spec.loader.exec_module(harinezumigel_llm_stack)
+
+# Import against the example environment, never the machine's deployment or keys.
+path_is_dir = Path.is_dir
+path_exists = Path.exists
+path_open = Path.open
+with (
+    patch.dict(os.environ, {}, clear=True),
+    patch.object(
+        Path,
+        "exists",
+        autospec=True,
+        side_effect=lambda path: (
+            True if path == Path("/opt/litellm/config/env") else path_exists(path)
+        ),
+    ),
+    patch.object(
+        Path,
+        "open",
+        autospec=True,
+        side_effect=lambda path, *args, **kwargs: path_open(
+            (
+                PROJECT_DIR / "config" / "env.example"
+                if path == Path("/opt/litellm/config/env")
+                else path
+            ),
+            *args,
+            **kwargs,
+        ),
+    ),
+    patch.object(
+        Path,
+        "is_dir",
+        autospec=True,
+        side_effect=lambda path: path == Path("/opt/litellm") or path_is_dir(path),
+    ),
+):
+    spec.loader.exec_module(harinezumigel_llm_stack)
 
 
 def safe_unlink(path: str | Path) -> None:
@@ -56,9 +92,9 @@ class TestEnvironmentLoading(unittest.TestCase):
 
     def test_load_env_file_basic(self):
         """Test loading basic KEY=value pairs."""
-        from harinezumigel_llm_stack import load_env_file # type: ignore
+        from harinezumigel_llm_stack import load_env_file  # type: ignore
 
-        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".env") as f:
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix="env") as f:
             f.write("TEST_VAR1=value1\n")
             f.write("TEST_VAR2=value2\n")
             f.write("# Comment line\n")
@@ -79,9 +115,9 @@ class TestEnvironmentLoading(unittest.TestCase):
 
     def test_load_env_file_with_export(self):
         """Test loading KEY=value with export prefix."""
-        from harinezumigel_llm_stack import load_env_file # type: ignore
+        from harinezumigel_llm_stack import load_env_file  # type: ignore
 
-        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".env") as f:
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix="env") as f:
             f.write("export EXPORT_VAR1=exported1\n")
             f.write("EXPORT_VAR2=exported2\n")
             temp_path = f.name
@@ -97,11 +133,11 @@ class TestEnvironmentLoading(unittest.TestCase):
 
     def test_load_env_file_with_variable_expansion(self):
         """Test variable expansion ${VAR} and $VAR."""
-        from harinezumigel_llm_stack import load_env_file # type: ignore
+        from harinezumigel_llm_stack import load_env_file  # type: ignore
 
         os.environ["BASE_DIR"] = "/opt/test"
 
-        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".env") as f:
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix="env") as f:
             f.write("EXPANDED1=${BASE_DIR}/subdir\n")
             f.write("EXPANDED2=$BASE_DIR/another\n")
             temp_path = f.name
@@ -118,10 +154,10 @@ class TestEnvironmentLoading(unittest.TestCase):
 
     def test_load_env_file_nonexistent(self):
         """Test that loading nonexistent file doesn't raise error."""
-        from harinezumigel_llm_stack import load_env_file # type: ignore
+        from harinezumigel_llm_stack import load_env_file  # type: ignore
 
         # Should not raise
-        load_env_file("/nonexistent/file.env")
+        load_env_file("/nonexistent/fileenv")
 
     def test_load_env_file_inline_comments(self):
         """Strip comments without damaging quoted or embedded hash characters."""
@@ -141,14 +177,16 @@ class TestEnvironmentLoading(unittest.TestCase):
             for raw_value, expected in cases:
                 with self.subTest(raw_value=raw_value):
                     with tempfile.TemporaryDirectory() as directory:
-                        env_path = Path(directory) / ".env"
-                        env_path.write_text(f"TEST_INLINE={raw_value}\n", encoding="utf-8")
+                        env_path = Path(directory) / "env"
+                        env_path.write_text(
+                            f"TEST_INLINE={raw_value}\n", encoding="utf-8"
+                        )
                         harinezumigel_llm_stack.load_env_file(str(env_path))
                     self.assertEqual(os.environ["TEST_INLINE"], expected)
 
     def test_env_string_required(self):
         """Test env_string with required flag."""
-        from harinezumigel_llm_stack import env_string # type: ignore
+        from harinezumigel_llm_stack import env_string  # type: ignore
 
         os.environ["REQUIRED_VAR"] = "test_value"
         self.assertEqual(env_string("REQUIRED_VAR", required=True), "test_value")
@@ -161,14 +199,14 @@ class TestEnvironmentLoading(unittest.TestCase):
 
     def test_env_string_with_default(self):
         """Test env_string with default value."""
-        from harinezumigel_llm_stack import env_string # type: ignore
+        from harinezumigel_llm_stack import env_string  # type: ignore
 
         result = env_string("NONEXISTENT_VAR", default="default_value")
         self.assertEqual(result, "default_value")
 
     def test_env_int(self):
         """Test env_int parsing."""
-        from harinezumigel_llm_stack import env_int # type: ignore
+        from harinezumigel_llm_stack import env_int  # type: ignore
 
         os.environ["INT_VAR"] = "42"
         self.assertEqual(env_int("INT_VAR"), 42)
@@ -187,7 +225,7 @@ class TestUtilityFunctions(unittest.TestCase):
 
     def test_resolve_env_value_plain_string(self):
         """Test resolve_env_value with plain strings."""
-        from harinezumigel_llm_stack import resolve_env_value # type: ignore
+        from harinezumigel_llm_stack import resolve_env_value  # type: ignore
 
         self.assertEqual(resolve_env_value("plain"), "plain")
         self.assertEqual(resolve_env_value(None), "")
@@ -195,7 +233,7 @@ class TestUtilityFunctions(unittest.TestCase):
 
     def test_resolve_env_value_os_environ(self):
         """Test resolve_env_value with os.environ/ prefix."""
-        from harinezumigel_llm_stack import resolve_env_value # type: ignore
+        from harinezumigel_llm_stack import resolve_env_value  # type: ignore
 
         os.environ["TEST_RESOLVE"] = "resolved_value"
         result = resolve_env_value("os.environ/TEST_RESOLVE")
@@ -204,7 +242,7 @@ class TestUtilityFunctions(unittest.TestCase):
 
     def test_resolve_env_value_shell_style(self):
         """Test resolve_env_value with shell-style variables."""
-        from harinezumigel_llm_stack import resolve_env_value # type: ignore
+        from harinezumigel_llm_stack import resolve_env_value  # type: ignore
 
         os.environ["SHELL_VAR"] = "expanded"
         result = resolve_env_value("$SHELL_VAR/path")
@@ -213,7 +251,7 @@ class TestUtilityFunctions(unittest.TestCase):
 
     def test_docker_safe_name(self):
         """Test docker_safe_name conversion."""
-        from harinezumigel_llm_stack import docker_safe_name # type: ignore
+        from harinezumigel_llm_stack import docker_safe_name  # type: ignore
 
         self.assertEqual(docker_safe_name("Model_Name"), "model_name")
         self.assertEqual(docker_safe_name("model@#$name"), "model-name")
@@ -222,7 +260,7 @@ class TestUtilityFunctions(unittest.TestCase):
 
     def test_backend_model_without_provider(self):
         """Test backend_model_without_provider."""
-        from harinezumigel_llm_stack import backend_model_without_provider # type: ignore
+        from harinezumigel_llm_stack import backend_model_without_provider  # type: ignore
 
         self.assertEqual(backend_model_without_provider("openai/gpt-4"), "gpt-4")
         self.assertEqual(backend_model_without_provider("model-name"), "model-name")
@@ -230,7 +268,7 @@ class TestUtilityFunctions(unittest.TestCase):
 
     def test_as_int(self):
         """Test as_int conversion."""
-        from harinezumigel_llm_stack import as_int # type: ignore
+        from harinezumigel_llm_stack import as_int  # type: ignore
 
         self.assertEqual(as_int("42"), 42)
         self.assertEqual(as_int(42), 42)
@@ -240,7 +278,7 @@ class TestUtilityFunctions(unittest.TestCase):
 
     def test_as_float(self):
         """Test as_float conversion."""
-        from harinezumigel_llm_stack import as_float # type: ignore
+        from harinezumigel_llm_stack import as_float  # type: ignore
 
         self.assertEqual(as_float("3.14"), 3.14)
         self.assertEqual(as_float(3.14), 3.14)
@@ -250,7 +288,7 @@ class TestUtilityFunctions(unittest.TestCase):
 
     def test_as_bool(self):
         """Test as_bool conversion."""
-        from harinezumigel_llm_stack import as_bool # type: ignore
+        from harinezumigel_llm_stack import as_bool  # type: ignore
 
         # Test truthy values
         self.assertTrue(as_bool(True))
@@ -271,7 +309,7 @@ class TestUtilityFunctions(unittest.TestCase):
 
     def test_docker_ipc_arg(self):
         """Test docker_ipc_arg normalization."""
-        from harinezumigel_llm_stack import docker_ipc_arg # type: ignore
+        from harinezumigel_llm_stack import docker_ipc_arg  # type: ignore
 
         self.assertIsNone(docker_ipc_arg(None))
         self.assertIsNone(docker_ipc_arg(""))
@@ -281,7 +319,7 @@ class TestUtilityFunctions(unittest.TestCase):
 
     def test_port_in_use(self):
         """Test port_in_use check."""
-        from harinezumigel_llm_stack import port_in_use # type: ignore
+        from harinezumigel_llm_stack import port_in_use  # type: ignore
 
         # Create a temporary server to occupy a port
         test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -323,7 +361,7 @@ class TestUtilityFunctions(unittest.TestCase):
 
     def test_redact_command(self):
         """Test redact_command for sensitive data."""
-        from harinezumigel_llm_stack import redact_command # type: ignore
+        from harinezumigel_llm_stack import redact_command  # type: ignore
 
         cmd = [
             "litellm",
@@ -347,7 +385,7 @@ class TestUtilityFunctions(unittest.TestCase):
 
     def test_extract_nvidia_driver_mismatch(self):
         """Extract required and detected versions from NVIDIA mismatch errors."""
-        from harinezumigel_llm_stack import extract_nvidia_driver_mismatch # type: ignore
+        from hls_preflight import extract_nvidia_driver_mismatch
 
         message = (
             "This container was built for NVIDIA Driver Release 595.58 or later, "
@@ -361,7 +399,7 @@ class TestUtilityFunctions(unittest.TestCase):
 
     def test_extract_nvidia_driver_mismatch_no_match(self):
         """Non-mismatch messages should return None."""
-        from harinezumigel_llm_stack import extract_nvidia_driver_mismatch # type: ignore
+        from hls_preflight import extract_nvidia_driver_mismatch
 
         self.assertIsNone(extract_nvidia_driver_mismatch("unrelated docker error"))
 
@@ -371,7 +409,7 @@ class TestFormatLogLine(unittest.TestCase):
 
     def test_format_log_line_with_stacktrace(self):
         """Test _format_log_line extracts stacktrace."""
-        from harinezumigel_llm_stack import _format_log_line # type: ignore
+        from harinezumigel_llm_stack import _format_log_line  # type: ignore
 
         log_obj = {
             "level": "ERROR",
@@ -390,7 +428,7 @@ class TestFormatLogLine(unittest.TestCase):
 
     def test_format_log_line_without_stacktrace(self):
         """Test _format_log_line with regular JSON."""
-        from harinezumigel_llm_stack import _format_log_line # type: ignore
+        from harinezumigel_llm_stack import _format_log_line  # type: ignore
 
         log_obj = {"level": "INFO", "message": "Normal log"}
         log_line = json.dumps(log_obj)
@@ -400,7 +438,7 @@ class TestFormatLogLine(unittest.TestCase):
 
     def test_format_log_line_non_json(self):
         """Test _format_log_line with non-JSON input."""
-        from harinezumigel_llm_stack import _format_log_line # type: ignore
+        from harinezumigel_llm_stack import _format_log_line  # type: ignore
 
         plain_text = "This is not JSON"
         result = _format_log_line(plain_text)
@@ -408,7 +446,7 @@ class TestFormatLogLine(unittest.TestCase):
 
     def test_format_log_line_pretty_debug_json(self):
         """Test _format_log_line pretty debug output for JSON records."""
-        from harinezumigel_llm_stack import _format_log_line # type: ignore
+        from harinezumigel_llm_stack import _format_log_line  # type: ignore
 
         log_obj = {
             "timestamp": "2026-10-18T09:00:00",
@@ -431,7 +469,7 @@ class TestFormatLogLine(unittest.TestCase):
 
     def test_format_log_line_pretty_debug_non_json(self):
         """Test _format_log_line pretty debug output for plain text records."""
-        from harinezumigel_llm_stack import _format_log_line # type: ignore
+        from harinezumigel_llm_stack import _format_log_line  # type: ignore
 
         plain_text = "plain line"
         result = _format_log_line(plain_text, pretty_debug=True)
@@ -444,7 +482,7 @@ class TestAppConfig(unittest.TestCase):
     def setUp(self):
         """Set up test environment variables."""
         self.env_vars = {
-            "LITELLM_CONFIG": "/opt/litellm/config.yaml",
+            "LITELLM_CONFIG": "/opt/litellm/config/config.yaml",
             "MODEL_ROOT": "/models",
             "LITELLM_VENV_ACTIVATE": "/opt/litellm/venv/bin/activate",
             "LITELLM_BIN": "/opt/litellm/venv/bin/litellm",
@@ -456,8 +494,6 @@ class TestAppConfig(unittest.TestCase):
             "VLLM_DOCKER_IMAGE": "vllm/vllm-openai:latest",
             "VLLM_MODEL_VOLUME": "/models:/models:ro",
             "VLLM_CACHE_VOLUME": "/cache:/cache",
-            "VLLM_AUTO_PORT_START": "8001",
-            "VLLM_AUTO_PORT_END": "8010",
         }
         for key, value in self.env_vars.items():
             os.environ[key] = value
@@ -474,20 +510,16 @@ class TestAppConfig(unittest.TestCase):
 
         config = AppConfig.from_env()
 
-        self.assertEqual(config.litellm_config, "/opt/litellm/config.yaml")
+        self.assertEqual(config.litellm_config, "/opt/litellm/config/config.yaml")
         self.assertEqual(config.model_root, "/models")
-        self.assertEqual(
-            config.env_file, os.environ.get("HLS_ENV_FILE", str(INSTALLED_BASE / ".env"))
-        )
+        self.assertEqual(config.env_file, str(INSTALLED_BASE / "config" / "env"))
         self.assertEqual(config.litellm_port, 4000)
         self.assertEqual(config.vllm_container_port, 8000)
-        self.assertEqual(config.vllm_auto_port_start, 8001)
-        self.assertEqual(config.vllm_auto_port_end, 8010)
 
     @patch("harinezumigel_llm_stack.load_env_file")
     def test_app_config_missing_required(self, mock_load: Any) -> None:
         """Test AppConfig.from_env() fails with missing required vars."""
-        from harinezumigel_llm_stack import AppConfig # type: ignore
+        from harinezumigel_llm_stack import AppConfig  # type: ignore
 
         os.environ.pop("MODEL_ROOT")
 
@@ -497,11 +529,13 @@ class TestAppConfig(unittest.TestCase):
     def test_app_config_derives_config_path_from_installed_base(self) -> None:
         """The installed base determines the config path, not the environment."""
         with (
-            patch.object(harinezumigel_llm_stack, "INSTALLED_BASE", Path("/test/install")),
+            patch.object(
+                harinezumigel_llm_stack, "INSTALLED_BASE", Path("/test/install")
+            ),
             patch.dict(os.environ, {"LITELLM_CONFIG": "/ignored/config.yaml"}),
         ):
             config = harinezumigel_llm_stack.AppConfig.from_env()
-        self.assertEqual(config.litellm_config, "/test/install/config.yaml")
+        self.assertEqual(config.litellm_config, "/test/install/config/config.yaml")
 
 
 class TestModelRequirements(unittest.TestCase):
@@ -509,7 +543,7 @@ class TestModelRequirements(unittest.TestCase):
 
     def test_require_model_int_valid(self):
         """Test require_model_int with valid integer."""
-        from harinezumigel_llm_stack import require_model_int # type: ignore
+        from harinezumigel_llm_stack import require_model_int  # type: ignore
 
         model_info = {"max_tokens": 4096}
         result = require_model_int("test_model", model_info, "max_tokens")
@@ -517,7 +551,7 @@ class TestModelRequirements(unittest.TestCase):
 
     def test_require_model_int_missing(self):
         """Test require_model_int with missing key."""
-        from harinezumigel_llm_stack import require_model_int # type: ignore
+        from harinezumigel_llm_stack import require_model_int  # type: ignore
 
         model_info: dict[str, Any] = {}
 
@@ -526,7 +560,7 @@ class TestModelRequirements(unittest.TestCase):
 
     def test_require_model_float_valid(self):
         """Test require_model_float with valid float."""
-        from harinezumigel_llm_stack import require_model_float # type: ignore
+        from harinezumigel_llm_stack import require_model_float  # type: ignore
 
         model_info = {"gpu_memory_utilization": 0.9}
         result = require_model_float("test_model", model_info, "gpu_memory_utilization")
@@ -534,7 +568,7 @@ class TestModelRequirements(unittest.TestCase):
 
     def test_require_model_float_missing(self):
         """Test require_model_float with missing key."""
-        from harinezumigel_llm_stack import require_model_float # type: ignore
+        from harinezumigel_llm_stack import require_model_float  # type: ignore
 
         model_info: dict[str, Any] = {}
 
@@ -548,7 +582,7 @@ class TestLLMStackInit(unittest.TestCase):
     def setUp(self):
         """Set up test configuration."""
         self.env_vars = {
-            "LITELLM_CONFIG": "/opt/litellm/config.yaml",
+            "LITELLM_CONFIG": "/opt/litellm/config/config.yaml",
             "MODEL_ROOT": "/models",
             "LITELLM_VENV_ACTIVATE": "/opt/litellm/venv/bin/activate",
             "LITELLM_BIN": "/opt/litellm/venv/bin/litellm",
@@ -572,7 +606,7 @@ class TestLLMStackInit(unittest.TestCase):
     @patch("harinezumigel_llm_stack.load_env_file")
     def test_llmstack_init(self, mock_load: Any) -> None:
         """Test LLMStack initialization."""
-        from harinezumigel_llm_stack import AppConfig, LLMStack # type: ignore
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
 
         config = AppConfig.from_env()
         stack = LLMStack(config)
@@ -584,7 +618,7 @@ class TestLLMStackInit(unittest.TestCase):
     @patch("harinezumigel_llm_stack.load_env_file")
     def test_parse_api_base(self, mock_load: Any) -> None:
         """Test _parse_api_base URL parsing."""
-        from harinezumigel_llm_stack import AppConfig, LLMStack # type: ignore
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
 
         config = AppConfig.from_env()
         stack = LLMStack(config)
@@ -602,12 +636,16 @@ class TestLLMStackInit(unittest.TestCase):
             ("https://localhost/v1", 443),
         ]:
             with self.subTest(url=url):
-                self.assertEqual(stack._parse_api_base(url), ("localhost", expected_port))
+                self.assertEqual(
+                    stack._parse_api_base(url), ("localhost", expected_port)
+                )
 
     def test_example_env_preserves_backend_host_and_port(self):
         """Host comments must not hide the backend port in expanded API URLs."""
         with patch.dict(os.environ, clear=True):
-            harinezumigel_llm_stack.load_env_file(str(SCRIPT_DIR / ".env.example"))
+            harinezumigel_llm_stack.load_env_file(
+                str(PROJECT_DIR / "config" / "env.example")
+            )
             with patch("harinezumigel_llm_stack.load_env_file"):
                 config = harinezumigel_llm_stack.AppConfig.from_env()
             stack = harinezumigel_llm_stack.LLMStack(config)
@@ -619,6 +657,76 @@ class TestLLMStackInit(unittest.TestCase):
             self.assertEqual(
                 stack._parse_api_base(api_base),
                 (config.vllm_host, 8011),
+            )
+
+    def test_standalone_coding_profiles_preserve_native_precision_and_context(self):
+        with patch.dict(os.environ, clear=True):
+            harinezumigel_llm_stack.load_env_file(
+                str(PROJECT_DIR / "config" / "env.example")
+            )
+            config = replace(
+                harinezumigel_llm_stack.AppConfig.from_env(),
+                litellm_config=str(PROJECT_DIR / "config" / "config.yaml.example"),
+            )
+            stack = harinezumigel_llm_stack.LLMStack(config)
+            stack.load_models()
+            for name in ("qwen3.8-27B", "qwen3-coder-30b-a3b-instruct"):
+                with self.subTest(model=name):
+                    model = stack.models[name]
+                    self.assertEqual(
+                        (
+                            model.context_length,
+                            model.max_input_tokens,
+                            model.max_output_tokens,
+                            model.model_info["max_tokens"],
+                        ),
+                        (253952, 233472, 16384, 16384),
+                    )
+                    self.assertEqual(model.max_num_seqs, 1)
+                    self.assertIsNone(model.model_info["quantization"])
+                    self.assertEqual(model.model_info["kv_cache_dtype"], "auto")
+                    self.assertTrue(model.model_info["enable_prefix_caching"])
+                    self.assertTrue(model.model_info["enable_chunked_prefill"])
+                    self.assertFalse(model.model_info["enforce_eager"])
+                    self.assertEqual(model.model_info["max_num_batched_tokens"], 16384)
+                    runtime: dict[str, int | float | str | None] = {
+                        "context_length": model.context_length,
+                        "gpu_memory_utilization": model.gpu_memory_utilization,
+                        "max_num_seqs": model.max_num_seqs,
+                        "dtype": model.dtype,
+                    }
+                    command = stack._build_vllm_command(
+                        model,
+                        Path("/models") / model.model_info["model_dir"],
+                        model.api_base_port,
+                        runtime,
+                    )
+                    self.assertIn("--enable-chunked-prefill", command)
+                    self.assertIn("--enable-prefix-caching", command)
+                    self.assertNotIn("--enforce-eager", command)
+                    self.assertEqual(
+                        command[command.index("--max-model-len") + 1], "253952"
+                    )
+                    self.assertEqual(
+                        json.loads(command[command.index("--speculative-config") + 1]),
+                        model.model_info["speculative_config"],
+                    )
+            self.assertEqual(
+                stack.models["qwen3.8-27B"].model_info["speculative_config"],
+                {"method": "mtp", "num_speculative_tokens": 3},
+            )
+            self.assertNotIn(
+                "attention_backend", stack.models["qwen3.8-27B"].model_info
+            )
+            self.assertEqual(
+                stack.models["qwen3-coder-30b-a3b-instruct"].model_info[
+                    "speculative_config"
+                ],
+                {
+                    "method": "dflash",
+                    "model": "z-lab/Qwen3-Coder-30B-A3B-DFlash",
+                    "num_speculative_tokens": 15,
+                },
             )
 
 
@@ -635,7 +743,7 @@ class TestLLMStackDockerOperations(unittest.TestCase):
         root_patch.start()
         self.addCleanup(root_patch.stop)
         self.env_vars = {
-            "LITELLM_CONFIG": "/opt/litellm/config.yaml",
+            "LITELLM_CONFIG": "/opt/litellm/config/config.yaml",
             "MODEL_ROOT": "/models",
             "LITELLM_VENV_ACTIVATE": "/opt/litellm/venv/bin/activate",
             "LITELLM_BIN": "/opt/litellm/venv/bin/litellm",
@@ -647,8 +755,6 @@ class TestLLMStackDockerOperations(unittest.TestCase):
             "VLLM_DOCKER_IMAGE": "vllm/vllm-openai:latest",
             "VLLM_MODEL_VOLUME": "/models:/models:ro",
             "VLLM_CACHE_VOLUME": "/cache:/cache",
-            "VLLM_AUTO_PORT_START": "8001",
-            "VLLM_AUTO_PORT_END": "8010",
         }
         for key, value in self.env_vars.items():
             os.environ[key] = value
@@ -662,7 +768,7 @@ class TestLLMStackDockerOperations(unittest.TestCase):
     @patch("harinezumigel_llm_stack.run_command")
     def test_docker_container_state(self, mock_run: Any, mock_load: Any) -> None:
         """Test _docker_container_state."""
-        from harinezumigel_llm_stack import AppConfig, LLMStack # type: ignore
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
 
         config = AppConfig.from_env()
         stack = LLMStack(config)
@@ -681,7 +787,7 @@ class TestLLMStackDockerOperations(unittest.TestCase):
     @patch("harinezumigel_llm_stack.run_command")
     def test_docker_list_container_names(self, mock_run: Any, mock_load: Any) -> None:
         """Test _docker_list_container_names."""
-        from harinezumigel_llm_stack import AppConfig, LLMStack # type: ignore
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
 
         config = AppConfig.from_env()
         stack = LLMStack(config)
@@ -699,42 +805,10 @@ class TestLLMStackDockerOperations(unittest.TestCase):
         self.assertEqual(len(names), 3)
 
     @patch("harinezumigel_llm_stack.load_env_file")
-    @patch("harinezumigel_llm_stack.port_in_use")
-    def test_find_free_port(self, mock_port_in_use: Any, mock_load: Any) -> None:
-        """Test _find_free_port."""
-        from harinezumigel_llm_stack import AppConfig, LLMStack # type: ignore
-
-        config = AppConfig.from_env()
-        stack = LLMStack(config)
-
-        # Mock first port in use, second port free
-        mock_port_in_use.side_effect = [True, False]
-
-        port = stack._find_free_port()
-        self.assertEqual(port, 8002)  # Second port in range
-
-    @patch("harinezumigel_llm_stack.load_env_file")
-    @patch("harinezumigel_llm_stack.port_in_use")
-    def test_find_free_port_all_busy(self, mock_port_in_use: Any, mock_load: Any) -> None:
-        """Test _find_free_port when all ports are busy."""
-        from harinezumigel_llm_stack import AppConfig, LLMStack # type: ignore
-
-        config = AppConfig.from_env()
-        stack = LLMStack(config)
-
-        # Mock all ports in use
-        mock_port_in_use.return_value = True
-
-        with self.assertRaises(RuntimeError) as context:
-            stack._find_free_port()
-
-        self.assertIn("No free ports available", str(context.exception))
-
-    @patch("harinezumigel_llm_stack.load_env_file")
     @patch("harinezumigel_llm_stack.run_command")
     def test_docker_port_in_use(self, mock_run: Any, mock_load: Any) -> None:
         """Test _docker_port_in_use."""
-        from harinezumigel_llm_stack import AppConfig, LLMStack # type: ignore
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
 
         config = AppConfig.from_env()
         stack = LLMStack(config)
@@ -748,9 +822,11 @@ class TestLLMStackDockerOperations(unittest.TestCase):
         self.assertFalse(stack._docker_port_in_use(8003))
 
     @patch("harinezumigel_llm_stack.load_env_file")
-    def test_build_vllm_command_includes_ipc_when_configured(self, mock_load: Any) -> None:
+    def test_build_vllm_command_includes_ipc_when_configured(
+        self, mock_load: Any
+    ) -> None:
         """model_info.ipc should add a Docker --ipc flag."""
-        from harinezumigel_llm_stack import AppConfig, LLMStack, ModelDeployment # type: ignore
+        from harinezumigel_llm_stack import AppConfig, LLMStack, ModelDeployment  # type: ignore
 
         config = AppConfig.from_env()
         stack = LLMStack(config)
@@ -796,9 +872,61 @@ class TestLLMStackDockerOperations(unittest.TestCase):
         self.assertIn("--ipc=host", command)
 
     @patch("harinezumigel_llm_stack.load_env_file")
-    def test_build_vllm_command_omits_ipc_when_not_configured(self, mock_load: Any) -> None:
+    def test_build_vllm_command_chunked_prefill(self, mock_load: Any) -> None:
+        config = harinezumigel_llm_stack.AppConfig.from_env()
+        stack = harinezumigel_llm_stack.LLMStack(config)
+        model = harinezumigel_llm_stack.ModelDeployment(
+            name="test_model",
+            backend_model="openai/test_model",
+            api_base="http://localhost:8001/v1",
+            api_key="sk-test",
+            api_base_host="localhost",
+            api_base_port=8001,
+            litellm_params={},
+            model_info={},
+            context_length=253952,
+            max_input_tokens=233472,
+            max_output_tokens=16384,
+            gpu_memory_utilization=0.9,
+            max_num_seqs=1,
+            dtype="auto",
+            license=None,
+            upstream=None,
+            alias=None,
+            description=None,
+            detail=None,
+            allow_rebuild=True,
+        )
+        runtime: dict[str, int | float | str | None] = {
+            "context_length": model.context_length,
+            "gpu_memory_utilization": model.gpu_memory_utilization,
+            "max_num_seqs": model.max_num_seqs,
+            "dtype": model.dtype,
+        }
+        for setting in (None, True, False, "true", "false"):
+            with self.subTest(setting=setting):
+                model.model_info["enable_chunked_prefill"] = setting
+                command = stack._build_vllm_command(
+                    model, Path("/models/test-model"), 8001, runtime
+                )
+                self.assertEqual(
+                    "--enable-chunked-prefill" in command,
+                    setting in (True, "true"),
+                )
+                self.assertEqual(
+                    "--no-enable-chunked-prefill" in command,
+                    setting in (False, "false"),
+                )
+                self.assertEqual(
+                    command[command.index("--max-model-len") + 1], "253952"
+                )
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    def test_build_vllm_command_omits_ipc_when_not_configured(
+        self, mock_load: Any
+    ) -> None:
         """No model_info.ipc should omit Docker --ipc flag."""
-        from harinezumigel_llm_stack import AppConfig, LLMStack, ModelDeployment # type: ignore
+        from harinezumigel_llm_stack import AppConfig, LLMStack, ModelDeployment  # type: ignore
 
         config = AppConfig.from_env()
         stack = LLMStack(config)
@@ -844,9 +972,11 @@ class TestLLMStackDockerOperations(unittest.TestCase):
         self.assertFalse(any(part.startswith("--ipc=") for part in command))
 
     @patch("harinezumigel_llm_stack.load_env_file")
-    def test_build_vllm_command_includes_reasoning_config_flag(self, mock_load: Any) -> None:
+    def test_build_vllm_command_includes_reasoning_config_flag(
+        self, mock_load: Any
+    ) -> None:
         """Normalize parser settings and preserve additional reasoning options."""
-        from harinezumigel_llm_stack import AppConfig, LLMStack, ModelDeployment # type: ignore
+        from harinezumigel_llm_stack import AppConfig, LLMStack, ModelDeployment  # type: ignore
 
         config = AppConfig.from_env()
         stack = LLMStack(config)
@@ -930,7 +1060,7 @@ class TestLLMStackDockerOperations(unittest.TestCase):
         mock_load: Any,
     ) -> None:
         """Legacy reasoning_config.enable_reasoning should fail fast."""
-        from harinezumigel_llm_stack import AppConfig, LLMStack, ModelDeployment # type: ignore
+        from harinezumigel_llm_stack import AppConfig, LLMStack, ModelDeployment  # type: ignore
 
         config = AppConfig.from_env()
         stack = LLMStack(config)
@@ -979,9 +1109,11 @@ class TestLLMStackDockerOperations(unittest.TestCase):
             )
 
     @patch("harinezumigel_llm_stack.load_env_file")
-    def test_build_vllm_command_includes_attention_config_flag(self, mock_load: Any) -> None:
+    def test_build_vllm_command_includes_attention_config_flag(
+        self, mock_load: Any
+    ) -> None:
         """model_info.attention_config should add --attention-config."""
-        from harinezumigel_llm_stack import AppConfig, LLMStack, ModelDeployment # type: ignore
+        from harinezumigel_llm_stack import AppConfig, LLMStack, ModelDeployment  # type: ignore
 
         config = AppConfig.from_env()
         stack = LLMStack(config)
@@ -1026,7 +1158,9 @@ class TestLLMStackDockerOperations(unittest.TestCase):
 
         self.assertIn("--attention-config", command)
         attention_config_index = command.index("--attention-config")
-        self.assertEqual(command[attention_config_index + 1], '{"backend":"flashinfer"}')
+        self.assertEqual(
+            command[attention_config_index + 1], '{"backend":"flashinfer"}'
+        )
 
         for config_key, config_value in (
             ("compilation_config", {"mode": "max-autotune"}),
@@ -1042,7 +1176,9 @@ class TestLLMStackDockerOperations(unittest.TestCase):
                     )
                     self.assertEqual(configured_command.count(flag), 1)
                     self.assertEqual(
-                        json.loads(configured_command[configured_command.index(flag) + 1]),
+                        json.loads(
+                            configured_command[configured_command.index(flag) + 1]
+                        ),
                         config_value,
                     )
 
@@ -1052,7 +1188,7 @@ class TestLLMStackDockerOperations(unittest.TestCase):
         mock_load: Any,
     ) -> None:
         """Without model_info.reasoning_config, --reasoning-config should be omitted."""
-        from harinezumigel_llm_stack import AppConfig, LLMStack, ModelDeployment # type: ignore
+        from harinezumigel_llm_stack import AppConfig, LLMStack, ModelDeployment  # type: ignore
 
         config = AppConfig.from_env()
         stack = LLMStack(config)
@@ -1099,16 +1235,18 @@ class TestLLMStackDockerOperations(unittest.TestCase):
 
     @patch("harinezumigel_llm_stack.load_env_file")
     @patch("harinezumigel_llm_stack.run_command")
-    def test_preflight_nvidia_driver_check_success(self, mock_run: Any, mock_load: Any) -> None:
+    def test_preflight_nvidia_driver_check_success(
+        self, mock_run: Any, mock_load: Any
+    ) -> None:
         """Preflight should pass when docker GPU probe succeeds."""
-        from harinezumigel_llm_stack import AppConfig, LLMStack # type: ignore
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
 
         config = AppConfig.from_env()
         stack = LLMStack(config)
 
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
-        stack._preflight_check_nvidia_driver(dry_run=False)
+        stack.preflight_checks.check_nvidia_driver(dry_run=False)
 
         mock_run.assert_called_once_with(
             [
@@ -1128,13 +1266,13 @@ class TestLLMStackDockerOperations(unittest.TestCase):
 
     @patch("harinezumigel_llm_stack.load_env_file")
     @patch("harinezumigel_llm_stack.run_command")
-    def test_preflight_nvidia_driver_check_mismatch_warns(
+    def test_preflight_nvidia_driver_check_mismatch_aborts(
         self,
         mock_run: Any,
         mock_load: Any,
     ) -> None:
-        """Preflight should warn but not abort on driver/image mismatch."""
-        from harinezumigel_llm_stack import AppConfig, LLMStack # type: ignore
+        """A confirmed driver/image mismatch must stop startup."""
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
 
         config = AppConfig.from_env()
         stack = LLMStack(config)
@@ -1148,20 +1286,160 @@ class TestLLMStackDockerOperations(unittest.TestCase):
             ),
         )
 
-        stack._preflight_check_nvidia_driver(dry_run=False)
+        for dry_run in (False, True):
+            with (
+                redirect_stdout(io.StringIO()) as output,
+                self.assertRaises(SystemExit) as error,
+            ):
+                stack.preflight_checks.check_nvidia_driver(dry_run=dry_run)
+
+            self.assertEqual(error.exception.code, 1)
+            self.assertIn("Required NVIDIA driver: >= 595.58", output.getvalue())
+            self.assertIn("Startup aborted", output.getvalue())
+
+        self.assertEqual(mock_run.call_count, 2)
 
     @patch("harinezumigel_llm_stack.load_env_file")
     @patch("harinezumigel_llm_stack.run_command")
-    def test_preflight_nvidia_driver_check_dry_run(self, mock_run: Any, mock_load: Any) -> None:
-        """Dry-run mode should not execute the docker GPU probe."""
-        from harinezumigel_llm_stack import AppConfig, LLMStack # type: ignore
+    def test_preflight_nvidia_driver_check_dry_run(
+        self, mock_run: Any, mock_load: Any
+    ) -> None:
+        """Dry-run mode executes the NVIDIA compatibility probe."""
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
 
         config = AppConfig.from_env()
         stack = LLMStack(config)
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
-        stack._preflight_check_nvidia_driver(dry_run=True)
+        with redirect_stdout(io.StringIO()) as output:
+            stack.preflight_checks.check_nvidia_driver(dry_run=True)
 
-        mock_run.assert_not_called()
+        mock_run.assert_called_once_with(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--gpus",
+                "all",
+                "--entrypoint",
+                "python3",
+                config.vllm_docker_image,
+                "-c",
+                "import sys; sys.exit(0)",
+            ],
+            capture=True,
+        )
+        self.assertIn("compatibility check (dry-run) passed", output.getvalue())
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    @patch("harinezumigel_llm_stack.run_command")
+    def test_preflight_nvidia_driver_check_unrelated_failure_warns(
+        self,
+        mock_run: Any,
+        mock_load: Any,
+    ) -> None:
+        """A non-mismatch probe failure warns but does not block startup."""
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
+
+        stack = LLMStack(AppConfig.from_env())
+        mock_run.side_effect = [
+            MagicMock(returncode=1, stdout="", stderr="registry unavailable"),
+            MagicMock(returncode=0, stdout="580.1", stderr=""),
+        ]
+
+        with redirect_stdout(io.StringIO()) as output:
+            stack.preflight_checks.check_nvidia_driver(dry_run=True)
+
+        self.assertIn("registry unavailable", output.getvalue())
+        self.assertIn("startup will continue", output.getvalue())
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    @patch("harinezumigel_llm_stack.run_command")
+    def test_preflight_gpu_memory_check_passes_on_dry_run(
+        self,
+        mock_run: Any,
+        mock_load: Any,
+    ) -> None:
+        """VRAM is checked during dry runs using the configured fraction."""
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
+
+        config = AppConfig.from_env()
+        stack = LLMStack(config)
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="0, 8192, 16384\n1, 4096, 8192\n",
+            stderr="",
+        )
+
+        with redirect_stdout(io.StringIO()) as output:
+            stack.preflight_checks.check_gpu_memory(["test_model"], 0.5, dry_run=True)
+
+        mock_run.assert_called_once_with(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,memory.free,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            capture=True,
+        )
+        self.assertIn(
+            "GPU VRAM preflight (dry-run) passed for model 'test_model'",
+            output.getvalue(),
+        )
+        self.assertIn("Available: 8192 MiB (8.00 GiB)", output.getvalue())
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    @patch("harinezumigel_llm_stack.run_command")
+    def test_preflight_gpu_memory_check_rejects_insufficient_memory(
+        self,
+        mock_run: Any,
+        mock_load: Any,
+    ) -> None:
+        """Startup stops when free VRAM is below the configured budget."""
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
+
+        config = AppConfig.from_env()
+        stack = LLMStack(config)
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="0, 4096, 16384\n",
+            stderr="",
+        )
+
+        with (
+            redirect_stdout(io.StringIO()) as output,
+            self.assertRaises(SystemExit) as error,
+        ):
+            stack.preflight_checks.check_gpu_memory(["test_model"], 0.5)
+
+        self.assertEqual(error.exception.code, 1)
+        self.assertIn("Insufficient GPU VRAM", output.getvalue())
+        self.assertIn("for model 'test_model'", output.getvalue())
+        self.assertIn("Available: 4096 MiB (4.00 GiB)", output.getvalue())
+        self.assertIn("required: 8192 MiB", output.getvalue())
+
+    @patch("harinezumigel_llm_stack.load_env_file")
+    @patch("harinezumigel_llm_stack.run_command")
+    def test_preflight_gpu_memory_check_names_multiple_models(
+        self,
+        mock_run: Any,
+        mock_load: Any,
+    ) -> None:
+        """Group VRAM failures identify the count and names of selected models."""
+        from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
+
+        stack = LLMStack(AppConfig.from_env())
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="0, 4096, 16384\n",
+            stderr="",
+        )
+
+        with redirect_stdout(io.StringIO()) as output, self.assertRaises(SystemExit):
+            stack.preflight_checks.check_gpu_memory(["model_a", "model_b"], 0.6)
+
+        self.assertIn("for 2 selected models (model_a, model_b)", output.getvalue())
+        self.assertIn("Available: 4096 MiB (4.00 GiB)", output.getvalue())
 
     @patch("harinezumigel_llm_stack.load_env_file")
     @patch("harinezumigel_llm_stack.run_command")
@@ -1176,10 +1454,16 @@ class TestLLMStackDockerOperations(unittest.TestCase):
         config = AppConfig.from_env()
         stack = LLMStack(config)
         docker_log_path = "/var/lib/docker/containers/test/test-json.log"
-        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="No such file")
+        mock_run.return_value = MagicMock(
+            returncode=1, stdout="", stderr="No such file"
+        )
 
         with patch.object(stack, "_resolve_model_name", return_value="test_model"):
-            with patch.object(stack, "_find_all_vllm_containers", return_value=["vllm-test_model-8001"]):
+            with patch.object(
+                stack,
+                "_find_all_vllm_containers",
+                return_value=["vllm-test_model-8001"],
+            ):
                 with patch.object(
                     stack,
                     "_docker_container_log_path",
@@ -1206,7 +1490,11 @@ class TestLLMStackDockerOperations(unittest.TestCase):
         stack = LLMStack(config)
 
         with patch.object(stack, "_resolve_model_name", return_value="test_model"):
-            with patch.object(stack, "_find_all_vllm_containers", return_value=["vllm-test_model-8001"]):
+            with patch.object(
+                stack,
+                "_find_all_vllm_containers",
+                return_value=["vllm-test_model-8001"],
+            ):
                 with patch.object(
                     stack,
                     "_docker_container_log_path",
@@ -1254,7 +1542,8 @@ class TestLLMStackDockerOperations(unittest.TestCase):
 
             mock_run.assert_not_called()
             self.assertEqual(
-                stack._litellm_logs_dir(), harinezumigel_llm_stack.INSTALLED_BASE / "logs"
+                stack._litellm_logs_dir(),
+                harinezumigel_llm_stack.INSTALLED_BASE / "logs",
             )
         finally:
             os.environ.pop("LITELLM_LOG_FILE", None)
@@ -1314,6 +1603,15 @@ class TestLLMStackDockerOperations(unittest.TestCase):
         stack.clean_litellm_logs()
         self.assertFalse((harinezumigel_llm_stack.INSTALLED_BASE / "logs").exists())
 
+    def test_clean_litellm_logs_empty_directory_reports_cleaned(self) -> None:
+        stack = harinezumigel_llm_stack.LLMStack(
+            harinezumigel_llm_stack.AppConfig.from_env()
+        )
+        stack._litellm_logs_dir()
+        with patch("builtins.print") as mock_print:
+            stack.clean_litellm_logs()
+        mock_print.assert_any_call("  Status:   ✓ Cleaned")
+
     def test_clean_litellm_logs_dry_run_preserves_files(self) -> None:
         """Dry-run cleanup must leave existing logs untouched."""
         stack = harinezumigel_llm_stack.LLMStack(
@@ -1325,7 +1623,9 @@ class TestLLMStackDockerOperations(unittest.TestCase):
         self.assertEqual(log_path.read_text(encoding="utf-8"), "keep")
 
     @patch("harinezumigel_llm_stack.load_env_file")
-    def test_show_litellm_logs_enables_pretty_format_on_debug(self, mock_load: Any) -> None:
+    def test_show_litellm_logs_enables_pretty_format_on_debug(
+        self, mock_load: Any
+    ) -> None:
         """show_litellm_logs should use pretty formatting when debug is enabled."""
         import tempfile
         import yaml  # type: ignore
@@ -1352,9 +1652,15 @@ class TestLLMStackDockerOperations(unittest.TestCase):
             fake_log_path = Path(tempfile.gettempdir()) / "litellm-debug-test.log"
 
             with patch.object(stack, "_find_litellm_pids", return_value=[]):
-                with patch.object(stack, "_litellm_log_path", return_value=fake_log_path):
-                    with patch.object(stack, "_tail_file_logs", return_value=0) as mock_tail:
-                        stack.show_litellm_logs(tail="10", follow=False, show_log_path=False)
+                with patch.object(
+                    stack, "_litellm_log_path", return_value=fake_log_path
+                ):
+                    with patch.object(
+                        stack, "_tail_file_logs", return_value=0
+                    ) as mock_tail:
+                        stack.show_litellm_logs(
+                            tail="10", follow=False, show_log_path=False
+                        )
 
             mock_tail.assert_called_once_with(
                 fake_log_path,
@@ -1397,12 +1703,20 @@ class TestLLMStackDockerOperations(unittest.TestCase):
             config = replace(AppConfig.from_env(), litellm_config=temp_config)
             stack = LLMStack(config)
 
-            fake_log_path = Path(tempfile.gettempdir()) / "litellm-detailed-debug-test.log"
+            fake_log_path = (
+                Path(tempfile.gettempdir()) / "litellm-detailed-debug-test.log"
+            )
 
             with patch.object(stack, "_find_litellm_pids", return_value=[]):
-                with patch.object(stack, "_litellm_log_path", return_value=fake_log_path):
-                    with patch.object(stack, "_tail_file_logs", return_value=0) as mock_tail:
-                        stack.show_litellm_logs(tail="10", follow=False, show_log_path=False)
+                with patch.object(
+                    stack, "_litellm_log_path", return_value=fake_log_path
+                ):
+                    with patch.object(
+                        stack, "_tail_file_logs", return_value=0
+                    ) as mock_tail:
+                        stack.show_litellm_logs(
+                            tail="10", follow=False, show_log_path=False
+                        )
 
             mock_tail.assert_called_once_with(
                 fake_log_path,
@@ -1418,7 +1732,9 @@ class TestLLMStackDockerOperations(unittest.TestCase):
             safe_unlink(temp_config)
 
     @patch("harinezumigel_llm_stack.load_env_file")
-    def test_handle_logs_all_show_log_includes_litellm_paths(self, mock_load: Any) -> None:
+    def test_handle_logs_all_show_log_includes_litellm_paths(
+        self, mock_load: Any
+    ) -> None:
         """all --show-log should show vLLM and LiteLLM log paths."""
         import argparse
 
@@ -1445,7 +1761,9 @@ class TestLLMStackDockerOperations(unittest.TestCase):
         mock_show_all_log_paths.assert_called_once_with()
 
     @patch("harinezumigel_llm_stack.load_env_file")
-    def test_handle_logs_litellm_clean_calls_litellm_clean(self, mock_load: Any) -> None:
+    def test_handle_logs_litellm_clean_calls_litellm_clean(
+        self, mock_load: Any
+    ) -> None:
         """litellm --clean-log should route to clean_litellm_logs."""
         import argparse
 
@@ -1478,7 +1796,7 @@ class TestLLMStackModelResolution(unittest.TestCase):
     def setUp(self):
         """Set up test configuration."""
         self.env_vars = {
-            "LITELLM_CONFIG": "/opt/litellm/config.yaml",
+            "LITELLM_CONFIG": "/opt/litellm/config/config.yaml",
             "MODEL_ROOT": "/models",
             "LITELLM_VENV_ACTIVATE": "/opt/litellm/venv/bin/activate",
             "LITELLM_BIN": "/opt/litellm/venv/bin/litellm",
@@ -1502,7 +1820,7 @@ class TestLLMStackModelResolution(unittest.TestCase):
     @patch("harinezumigel_llm_stack.load_env_file")
     def test_resolve_model_name_exact(self, mock_load: Any) -> None:
         """Test _resolve_model_name with exact match."""
-        from harinezumigel_llm_stack import AppConfig, LLMStack, ModelDeployment # type: ignore
+        from harinezumigel_llm_stack import AppConfig, LLMStack, ModelDeployment  # type: ignore
 
         config = AppConfig.from_env()
         stack = LLMStack(config)
@@ -1538,7 +1856,7 @@ class TestLLMStackModelResolution(unittest.TestCase):
     @patch("harinezumigel_llm_stack.load_env_file")
     def test_resolve_model_name_alias(self, mock_load: Any) -> None:
         """Test _resolve_model_name with alias."""
-        from harinezumigel_llm_stack import AppConfig, LLMStack, ModelDeployment # type: ignore
+        from harinezumigel_llm_stack import AppConfig, LLMStack, ModelDeployment  # type: ignore
 
         config = AppConfig.from_env()
         stack = LLMStack(config)
@@ -1580,27 +1898,35 @@ class TestLLMStackModelResolution(unittest.TestCase):
 class TestFormatSamplingParameters(unittest.TestCase):
     """Test format_sampling_parameters utility."""
 
-    def test_override_takes_precedence(self):
-        """override_generation_config values are labeled as 'model-spec'."""
+    def test_backend_defaults_are_labeled(self):
+        """Backend defaults are distinct from proxy defaults."""
         from harinezumigel_llm_stack import format_sampling_parameters  # type: ignore
 
         result = format_sampling_parameters(
             {"temperature": 0.5, "top_p": 0.9},
-            {"temperature": 0.7},
+            {"top_k": 20},
         )
-        self.assertIn("temperature=0.5(model-spec)", result)
-        self.assertIn("top_p=0.9(model-spec)", result)
+        self.assertIn("temperature=0.5(backend default)", result)
+        self.assertIn("top_p=0.9(backend default)", result)
+        self.assertIn("top_k=20(proxy default)", result)
 
     def test_litellm_params_fallback(self):
-        """litellm_params values are used and labeled 'litellm' when no override."""
+        """Proxy-only defaults remain visible."""
         from harinezumigel_llm_stack import format_sampling_parameters  # type: ignore
 
         result = format_sampling_parameters(
             {},
             {"temperature": 0.2, "top_k": 20},
         )
-        self.assertIn("temperature=0.2(litellm)", result)
-        self.assertIn("top_k=20(litellm)", result)
+        self.assertIn("temperature=0.2(proxy default)", result)
+        self.assertIn("top_k=20(proxy default)", result)
+
+    def test_zero_defaults_are_displayed(self):
+        result = harinezumigel_llm_stack.format_sampling_parameters(
+            {"temperature": 0.0}, {"presence_penalty": 0.0}
+        )
+        self.assertIn("temperature=0.0(backend default)", result)
+        self.assertIn("presence_penalty=0.0(proxy default)", result)
 
     def test_empty_params_returns_empty_list(self):
         """No params configured returns empty list."""
@@ -1622,7 +1948,7 @@ class TestSafetyGuards(unittest.TestCase):
         root_patch.start()
         self.addCleanup(root_patch.stop)
         self.env_vars = {
-            "LITELLM_CONFIG": "/opt/litellm/config.yaml",
+            "LITELLM_CONFIG": "/opt/litellm/config/config.yaml",
             "MODEL_ROOT": "/models",
             "LITELLM_VENV_ACTIVATE": "/opt/litellm/venv/bin/activate",
             "LITELLM_BIN": "/opt/litellm/venv/bin/litellm",
@@ -1634,8 +1960,6 @@ class TestSafetyGuards(unittest.TestCase):
             "VLLM_DOCKER_IMAGE": "vllm/vllm-openai:latest",
             "VLLM_MODEL_VOLUME": "/models:/models:ro",
             "VLLM_CACHE_VOLUME": "/cache:/cache",
-            "VLLM_AUTO_PORT_START": "8001",
-            "VLLM_AUTO_PORT_END": "8010",
         }
         for key, value in self.env_vars.items():
             os.environ[key] = value
@@ -1966,7 +2290,9 @@ class TestSafetyGuards(unittest.TestCase):
                 dtype=None,
             )
 
-            with patch.object(stack, "show_litellm_log_path") as mock_show_litellm_log_path:
+            with patch.object(
+                stack, "show_litellm_log_path"
+            ) as mock_show_litellm_log_path:
                 stack.run(args)
 
             mock_show_litellm_log_path.assert_called_once_with()
@@ -2091,7 +2417,9 @@ class TestSafetyGuards(unittest.TestCase):
 
     @patch("harinezumigel_llm_stack.load_env_file")
     @patch("harinezumigel_llm_stack.run_command")
-    def test_stop_litellm_uses_config_scoped_patterns(self, mock_run: Any, mock_load: Any) -> None:
+    def test_stop_litellm_uses_config_scoped_patterns(
+        self, mock_run: Any, mock_load: Any
+    ) -> None:
         """stop_litellm must search only for processes using this config path."""
         from harinezumigel_llm_stack import AppConfig, LLMStack  # type: ignore
 
@@ -2329,7 +2657,9 @@ class TestSafetyGuards(unittest.TestCase):
             safe_unlink(temp_config)
 
     @patch("harinezumigel_llm_stack.load_env_file")
-    def test_top_level_rebuild_false_blocks_recreate_alias(self, mock_load: Any) -> None:
+    def test_top_level_rebuild_false_blocks_recreate_alias(
+        self, mock_load: Any
+    ) -> None:
         """Top-level rebuild: false must block --recreate when starting by alias."""
         import argparse
         import tempfile
@@ -2396,7 +2726,9 @@ class TestSafetyGuards(unittest.TestCase):
             safe_unlink(temp_config)
 
     @patch("harinezumigel_llm_stack.load_env_file")
-    def test_missing_top_level_rebuild_blocks_recreate_with_message(self, mock_load: Any) -> None:
+    def test_missing_top_level_rebuild_blocks_recreate_with_message(
+        self, mock_load: Any
+    ) -> None:
         """Missing top-level rebuild must block --recreate even if model_info.rebuild is true."""
         import argparse
         import io
@@ -2476,6 +2808,72 @@ class TestCLIProgramName(unittest.TestCase):
     def setUp(self) -> None:
         self.stack = harinezumigel_llm_stack.LLMStack(harinezumigel_llm_stack.APP)
 
+    def test_help_examples_are_aligned(self) -> None:
+        for invoked in ("llm", "harinezumigel-llm-stack"):
+            with self.subTest(invoked=invoked), patch.object(sys, "argv", [invoked]):
+                text = self.stack.generate_help()
+                examples = text.split("Examples:\n", 1)[1]
+                commands = [
+                    line
+                    for line in examples.splitlines()
+                    if line.lstrip().startswith(f"{invoked} ")
+                ]
+                self.assertTrue(commands)
+                self.assertTrue(
+                    all(line.startswith(f"    {invoked} ") for line in commands)
+                )
+                columns = {line.index("#") for line in commands if "#" in line}
+                self.assertEqual(columns, {4 + len(invoked) + 1 + 42 + 1})
+                self.assertIn("  Batch startup:\n  --------------\n\n", examples)
+                self.assertIn(
+                    f"{invoked} --group rag --start --startup-timeout 600", examples
+                )
+
+    def test_help_does_not_dump_model_values(self) -> None:
+        self.stack.models = {"not-for-help": MagicMock()}
+        text = self.stack.generate_help()
+        self.assertNotIn("Current model values", text)
+        self.assertNotIn("not-for-help", text)
+        self.assertNotIn("gpu_mem=", text)
+        self.assertIn("Run without arguments to show detailed model settings.", text)
+
+    def test_terminal_color_respects_output_and_environment(self) -> None:
+        cases = [
+            (True, {"TERM": "xterm-256color"}, True),
+            (True, {"TERM": "screen"}, True),
+            (True, {"TERM": "xterm", "NO_COLOR": ""}, False),
+            (True, {"TERM": "dumb"}, False),
+            (True, {}, False),
+            (False, {"TERM": "xterm-256color"}, False),
+        ]
+        for tty, env, colored in cases:
+            with self.subTest(tty=tty, env=env):
+                with patch.dict(os.environ, env, clear=True):
+                    with patch.object(sys.stdout, "isatty", return_value=tty):
+                        text = harinezumigel_llm_stack.terminal_style(
+                            "example", accent=True
+                        )
+                self.assertEqual("\033[" in text, colored)
+                if colored:
+                    self.assertEqual(text, "\033[36mexample\033[0m")
+                else:
+                    self.assertEqual(text, "example")
+
+    def test_colored_help_preserves_plain_layout(self) -> None:
+        import re
+
+        with patch.object(sys, "argv", ["llm"]):
+            with patch.dict(os.environ, {"TERM": "xterm"}, clear=True):
+                with patch.object(sys.stdout, "isatty", return_value=False):
+                    plain = self.stack.generate_help()
+                with patch.object(sys.stdout, "isatty", return_value=True):
+                    colored = self.stack.generate_help()
+        self.assertIn("\033[1m  Batch startup:\033[0m", colored)
+        self.assertIn("\033[36m    llm --group rag --start", colored)
+        self.assertEqual(re.sub(r"\033\[[0-9;]*m", "", colored), plain)
+        self.assertNotIn("\033[37m", colored)
+        self.assertNotIn("\033[30m", colored)
+
     def test_help_uses_invoked_filename(self) -> None:
         for invoked, expected in [
             ("harinezumigel-llm-stack", "harinezumigel-llm-stack"),
@@ -2490,7 +2888,7 @@ class TestCLIProgramName(unittest.TestCase):
                     for line in text.splitlines()
                     if " --" in line and not line.lstrip().startswith("-")
                 ]
-                self.assertEqual(len(commands), 25)
+                self.assertGreaterEqual(len(commands), 29)
                 for command in commands:
                     self.assertTrue(command.startswith(f"{expected} "), command)
                 if expected != "harinezumigel-llm-stack":
@@ -2530,8 +2928,13 @@ class TestCLIProgramName(unittest.TestCase):
         with patch.object(sys, "argv", ["llm", "coder", "--show-log"]):
             args = harinezumigel_llm_stack.parse_args()
             with patch.object(self.stack, "_resolve_model_name", return_value="coder"):
-                with patch.object(self.stack, "_find_all_vllm_containers", return_value=[]):
-                    with redirect_stdout(output), self.assertRaises(SystemExit) as error:
+                with patch.object(
+                    self.stack, "_find_all_vllm_containers", return_value=[]
+                ):
+                    with (
+                        redirect_stdout(output),
+                        self.assertRaises(SystemExit) as error,
+                    ):
                         self.stack.handle_logs(args)
         self.assertEqual(error.exception.code, 1)
         self.assertIn("  llm coder --start\n", output.getvalue())
@@ -2541,7 +2944,9 @@ class TestCLIProgramName(unittest.TestCase):
     def test_existing_litellm_instance_hint_uses_invoked_filename(self) -> None:
         output = io.StringIO()
         with patch.object(sys, "argv", ["llm"]):
-            with patch.object(self.stack, "_find_litellm_pids", return_value=["other-pid"]):
+            with patch.object(
+                self.stack, "_find_litellm_pids", return_value=["other-pid"]
+            ):
                 with redirect_stdout(output), self.assertRaises(SystemExit) as error:
                     self.stack.start_litellm()
         self.assertEqual(error.exception.code, 1)
@@ -2557,7 +2962,9 @@ class TestCLIParseArgs(unittest.TestCase):
         """--stream-log should normalize to --show-log + --follow."""
         from harinezumigel_llm_stack import parse_args  # type: ignore
 
-        with patch.object(sys, "argv", ["harinezumigel-llm-stack", "mistral_7b", "--stream-log"]):
+        with patch.object(
+            sys, "argv", ["harinezumigel-llm-stack", "mistral_7b", "--stream-log"]
+        ):
             args = parse_args()
 
         self.assertTrue(args.stream_log)
@@ -2609,7 +3016,7 @@ class TestRunCommand(unittest.TestCase):
 
     def test_run_command_success(self):
         """Test run_command with successful execution."""
-        from harinezumigel_llm_stack import run_command # type: ignore
+        from harinezumigel_llm_stack import run_command  # type: ignore
 
         result = run_command(["echo", "test"], capture=True, check=False)
 
@@ -2618,7 +3025,7 @@ class TestRunCommand(unittest.TestCase):
 
     def test_run_command_failure(self):
         """Test run_command with failed execution."""
-        from harinezumigel_llm_stack import run_command # type: ignore
+        from harinezumigel_llm_stack import run_command  # type: ignore
 
         result = run_command(["false"], capture=True, check=False)
         self.assertNotEqual(result.returncode, 0)

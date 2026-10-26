@@ -1,1095 +1,800 @@
-# harinezumigel-llm-stack - Unified LiteLLM + vLLM Launcher
+# harinezumigel-llm-stack
 
-A Python CLI tool for managing [LiteLLM](https://github.com/BerriAI/litellm) proxy servers and [vLLM](https://github.com/vllm-project/vllm) model backends in Docker containers.
+Manage a host-based [LiteLLM](https://github.com/BerriAI/litellm) proxy and
+[vLLM](https://github.com/vllm-project/vllm) backends in NVIDIA GPU-enabled Docker
+containers through one Python CLI. Clients use an OpenAI-compatible API; the
+launcher handles model selection, container reuse, startup monitoring, and logs.
 
-The launcher is **not limited to NVIDIA DGX Spark**. It supports Unix hosts with Docker and NVIDIA GPU passthrough, provided the host architecture, NVIDIA GPU, and installed driver are compatible with the selected NVIDIA-provided vLLM container image.
+This is not limited to NVIDIA DGX Spark: your host architecture, GPU, and driver
+must support the selected NVIDIA NGC vLLM image.
 
-⚠️ **Disclaimer**: This project is provided "as is" without warranty of any kind and is not intended for production use without proper validation and testing. This project is not affiliated with LLMStack (llmstack.ai / Promptly).
+## Documentation website
 
-> **⚠️ Security notice**: LiteLLM always serves the admin web UI at `/ui` — it cannot be disabled via configuration. Restrict access to the LiteLLM port at the network or reverse proxy level if you do not want the UI reachable.
+The GitHub Pages landing page is maintained in [docs/index.md](docs/index.md).
+After pushing these files, open the repository's **Settings > Pages**, select
+**Deploy from a branch**, choose **main** and **/docs**, then click **Save**.
+Once the Pages deployment completes, the website is available at
+<https://harinezumigel.github.io/harinezumigel-llm-stack/>.
+The README remains the full installation and operating guide.
 
-## Overview
+> ❗ **Important** Provided **as is**, without warranty. Read the [disclaimer](#disclaimer)
+> before use and validate before production deployment.
+> This project is not affiliated with LLMStack (llmstack.ai / Promptly).
+> LiteLLM serves an admin UI at `/ui`; do not assume API authentication hides
+> that route. Restrict network access or block it at a reverse proxy.
 
-`harinezumigel-llm-stack` provides a unified interface to orchestrate multiple language model deployments using:
+## Example: Develop local RAG pipeline and use local coding LLM
 
-- **LiteLLM**: Universal API proxy that provides an OpenAI-compatible interface to multiple LLM providers
-- **vLLM**: High-throughput, memory-efficient inference engine for LLMs
+Suppose your RAG project needs three models:
 
-The script manages the entire lifecycle of your LLM infrastructure:
-- Start/stop LiteLLM proxy server
-- Launch vLLM model backends in Docker containers
-- Automatic port management and container reuse
-- Runtime parameter overrides
-- Log viewing and monitoring
+| Role | CLI alias in the example config | Model |
+|---|---|---|
+| Prompt-check / safety | `guard` | Llama Guard 3 8B |
+| Answer generation / inference | `mistral` | Mistral 7B Instruct v0.3 |
+| Grounding and answer-quality judge | `judge` | Qwen2.5-14B-Instruct |
+| Separate coding assistant | `coder` | Qwen3-Coder-Next-AWQ |
 
-## Features
+Your hardware can run the RAG trio **or** the coding model, but not both.
+Use ordered `model_groups` to name these selections, then explicitly stop one
+workload before starting the other. **Starting a group does not stop another
+group or any unselected model.** Groups are selections, not resource schedulers,
+mutually exclusive profiles, or GPU-priority settings.
 
-- **Configuration-driven**: All settings from `.env` and `config.yaml` (no hardcoded values)
-- **Model aliases**: Define short aliases for models (e.g., `coder` for `Qwen3-Coder-Next-AWQ`)
-- **Model descriptions**: Add `description` and `detail` fields for richer `--list` output
-- **Sampling parameter display**: Effective sampling parameters (from `override_generation_config` and `litellm_params`) are shown in `--list` and at LiteLLM startup, labeled by source (`model-spec` vs `litellm`)
-- **Dataclass-based configuration**: `LLMStack` class manages all state and lifecycle operations
-- **Dry-run mode**: Explicit flags for destructive operations, container reuse by default
-- **Port management**: Manual or automatic port allocation, runtime parameter overrides
-- **Log viewing**: JSON stacktrace formatting, container status inspection
-- **Log formatting**: Expands JSON-escaped stack traces to readable multi-line output
-- **Docker-based**: Uses Docker for isolation, GPU passthrough, and resource management
-- **NGC vLLM image**: Uses NVIDIA NGC container image
-- **Startup NVIDIA compatibility probe**: On model start, runs a lightweight GPU/image probe and prints a warning with required/detected driver versions when a mismatch is detected
+For a taste of the workflow, give each workload a name:
 
-## Prerequisites
+```yaml
+model_groups:
+  rag: [mistral, guard, judge, litellm]
+  coding: [coder, litellm]
+```
 
-- A Unix host with a CPU architecture supported by the selected NVIDIA vLLM container image; NVIDIA DGX Spark is not required
-- Python 3.10+ with `pyyaml` package
-- Docker with NVIDIA GPU support (NVIDIA Container Toolkit) and a working `--gpus all` configuration
-- An NVIDIA GPU and host driver compatible with the selected NVIDIA NGC vLLM image (`VLLM_DOCKER_IMAGE`)
-- Access to NVIDIA NGC (free NVIDIA Developer account may be required)
-- `nvidia-smi` available (for GPU detection)
-- LiteLLM installed in a virtual environment (for proxy server)
-- Pre-downloaded model files in a designated directory
+Then create and start the RAG backend containers
+together, and switch to coding when needed:
 
-
-### Quick Install
-
-Run the provided installation script:
+**`--start` creates a model's container if it does not exist, then starts it.**
+If the container already exists, it is reused: stopped containers are started,
+and running containers are left running.
 
 ```bash
-cd scripts/github_deploy
+# Preview creation, then create and start missing RAG backend containers.
+# LiteLLM runs as a host process, not a container.
+harinezumigel-llm-stack --group rag --start --dry-run
+harinezumigel-llm-stack --group rag --start
+
+# After stopping client traffic, swap the RAG workload for the coding model.
+# The coding backend container is created on its first start.
+harinezumigel-llm-stack --group rag --stop &&
+  harinezumigel-llm-stack --group coding --start
+```
+
+These commands assume installation, downloaded model files, and configured
+groups. The [installation guide](#install-from-any-checkout-location) gets you
+started; the [config.yaml guide](#configyaml-guide-models-groups-and-runtime-settings)
+explains models, groups, and runtime settings, while the
+[env guide](#env-guide-urls-ports-secrets-and-host-settings) explains URLs, ports,
+secrets, and host settings. The
+[running and switching workloads](#run-and-switch-workloads) covers status,
+switching back, and the shared proxy. The
+[Mistral 7B example](#a-realistic-mistral-entry) illustrates how a group member
+is configured; it is not an instruction to edit or replace that model's entry.
+
+> ❗ **Important**
+> The launcher does not download models. Download the **complete model files**
+> to `/opt/models` first, including weights, tokenizer, and configuration files.
+
+Use the directory names in the
+[model-files example](#env-guide-urls-ports-secrets-and-host-settings).
+
+## Install from any checkout location
+
+### Requirements
+
+- Unix host, Python 3.10+, and [PyYAML](https://pyyaml.org/).
+- Docker with NVIDIA Container Toolkit and working GPU passthrough
+  (`--gpus all`); `nvidia-smi` available on the host.
+- An NVIDIA GPU, driver, and CPU architecture compatible with your chosen
+  `VLLM_DOCKER_IMAGE`. NGC access / registry authentication may be required.
+- Complete model files downloaded under `MODEL_ROOT`, with any upstream access
+  requirements and licenses satisfied.
+- LiteLLM installed in its own virtual environment (the installer sets this up).
+
+Choose any checkout directory; no specific checkout location
+is required:
+
+```bash
+git clone https://github.com/Harinezumigel/harinezumigel-llm-stack.git "$HOME/harinezumigel-llm-stack"
+cd "$HOME/harinezumigel-llm-stack"
 ./install.sh
 ```
 
-The installer will:
-- Check Python, Docker, and GPU availability
-- Install PyYAML (system package preferred)
-- Create `/opt/litellm` directory structure
-- Copy example configuration files
-- Create a symlink to `~/.local/bin/harinezumigel-llm-stack`
-- Guide you through setup steps
+If already cloned elsewhere, run `./install.sh` from that repository root.
+All repository-relative commands below assume that root, whatever its location.
+The installer copies the launcher and runtime helper modules into
+`/opt/litellm/src` and links `~/.local/bin/harinezumigel-llm-stack` to
+`/opt/litellm/src/harinezumigel-llm-stack.py`. The installed command does not
+depend on the checkout location. Rerun the installer to update the installed
+runtime after updating the repository.
 
-### Manual Installation
+The `install` command used below is a standard Linux file-copying tool, not a
+package manager. `install -m 644` copies files with owner read/write and
+everyone else read-only permissions. The launcher is then made executable
+with `chmod +x`; its helper modules only need to be readable.
 
-**PyYAML:**
+The interactive installer checks prerequisites, installs PyYAML, creates
+`/opt/litellm`, offers to copy the configuration examples, and installs/upgrades
+`litellm[proxy]` in `/opt/litellm/venv` with a final `pip check`.
+Add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile if needed.
+
+Deployment files are separate from the checkout:
+
+| Path | Purpose |
+|---|---|
+| `/opt/litellm/src` | Installed launcher and runtime helper modules |
+| `/opt/litellm/config/env` | Paths, image, bind addresses, ports, keys |
+| `/opt/litellm/config/config.yaml` | Models, aliases, groups, LiteLLM settings |
+| `/opt/litellm/venv` | LiteLLM proxy virtual environment |
+| `/opt/litellm/logs` | Timestamped proxy logs |
+| `/opt/litellm/old_configs` | Timestamped configuration backups |
+
+Missing or empty configuration files are initialized from the current examples.
+Before replacing existing configuration files, the installer makes uniquely
+named backups with owner-only permissions and reports their exact paths at the
+end. On a fresh install, it reports that no previous configuration files needed
+backing up. Legacy `config/.env`, root-level `env` / `.env`, and root-level
+`config.yaml` are backed up rather than migrated as active configuration; the
+originals remain in place. Review the backups and manually carry over any
+host-specific values into the current examples.
+Replacing an existing virtual environment retains it under
+`/opt/litellm/venv_backup_*/venv`. Declining both reuse and reinstallation aborts.
+
+### Manual alternative
+
+From your checkout root, on Debian/Ubuntu:
+
 ```bash
-# Ubuntu/Debian (recommended)
-sudo apt install python3-yaml
-
-# Fedora/RHEL
-sudo dnf install python3-pyyaml
-
-# Or via pip if needed
-pip3 install --user pyyaml
-```
-
-**LiteLLM:**
-```bash
+sudo apt install python3-yaml python3-venv
+sudo mkdir -p /opt/litellm
+sudo chown "$USER:$(id -gn)" /opt/litellm
+mkdir -p /opt/litellm/config
+# Fresh installation only: do not overwrite existing deployment settings.
+cp config/env.example /opt/litellm/config/env
+cp config/config.yaml.example /opt/litellm/config/config.yaml
 python3 -m venv /opt/litellm/venv
-source /opt/litellm/venv/bin/activate
-pip install 'litellm[proxy]'
+/opt/litellm/venv/bin/pip install 'litellm[proxy]'
+/opt/litellm/venv/bin/pip check
+mkdir -p "$HOME/.local/bin"
+mkdir -p /opt/litellm/src
+install -m 644 src/harinezumigel-llm-stack.py src/hls_*.py /opt/litellm/src/
+chmod +x /opt/litellm/src/harinezumigel-llm-stack.py
+ln -s /opt/litellm/src/harinezumigel-llm-stack.py "$HOME/.local/bin/harinezumigel-llm-stack"
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-## Installation
+On Fedora/RHEL, PyYAML is available as `python3-pyyaml`; alternatively install
+PyYAML in the Python environment used to run the launcher. The launcher and
+LiteLLM proxy can use different Python environments.
 
-### Automated Installation (Recommended)
+## Configure the deployment
 
-```bash
-cd scripts/github_deploy
-./install.sh
-```
+Start with [config/env.example](config/env.example) and
+[config/config.yaml.example](config/config.yaml.example), copied to the paths
+above. Review them before starting anything; the catalog includes alternative
+models, not a recommendation to run them all.
 
-If you choose to copy `.env.example` during install, it becomes `/opt/litellm/.env`,
-which is the authoritative runtime configuration read by this tool.
-Review `VLLM_DOCKER_IMAGE` before first start and select a tag compatible with your
-installed NVIDIA driver version (`nvidia-smi`).
+- **`config.yaml` defines the models:** their names, aliases, groups, and runtime
+  settings. See the [config.yaml guide](#configyaml-guide-models-groups-and-runtime-settings).
+- **`env` defines deployment values:** URLs, ports, secrets, host paths, and
+  Docker settings. See the [env guide](#env-guide-urls-ports-secrets-and-host-settings).
+  Model entries reference these environment variables rather than embedding secrets.
 
-If the installer reports dependency issues in `/opt/litellm/venv`:
-- The script now relies on `litellm[proxy]` dependency resolution and runs `pip check` afterward.
-- `mcp` is used for Model Context Protocol tool/server integrations, not for LiteLLM proxy runtime.
-- If the venv was reused and has stale/conflicting packages, recreate `/opt/litellm/venv` and run `./install.sh` again.
+### env guide: URLs, ports, secrets, and host settings
 
-### Manual Installation
+Edit `/opt/litellm/config/env`:
 
-1. **Clone this repository**:
-   ```bash
-   git clone <your-repo-url>
-   cd <repo-directory>
-   ```
+- Set `MODEL_ROOT` to the parent directory containing your model directories
+  and `VLLM_MODEL_VOLUME` to mount
+  that same directory at `/models` (example: `/opt/models:/models`).
+  Set `VLLM_CACHE_VOLUME` to a persistent host cache.
+- Check `LITELLM_BIN` and `LITELLM_VENV_ACTIVATE` point to your proxy environment.
+- Choose a `VLLM_DOCKER_IMAGE` compatible with your host; check `nvidia-smi`
+  and the image's requirements rather than assuming the example tag fits.
+- Replace **both** placeholder keys: `LITELLM_MASTER_KEY` authenticates clients
+  to the proxy; `LOCAL_VLLM_API_KEY` authenticates proxy-to-backend requests.
+- The example exposes LiteLLM on the target host's LAN IP and keeps vLLM
+  backends private on loopback. Replace the example LAN IP with your host's IP.
+  For host-local clients only, also set `LITELLM_BIND_HOST=127.0.0.1`.
 
-2. **Create directory structure**:
-   ```bash
-   sudo mkdir -p /opt/litellm
-   sudo chown $USER:$USER /opt/litellm
-   ```
+**Example: Copilot connects over the LAN; LiteLLM and vLLM run on the same
+target host (`192.168.100.50`).**
 
-3. **Copy example configs**:
-   ```bash
-   cp .env.example /opt/litellm/.env
-   cp config.yaml.example /opt/litellm/config.yaml
-   ```
-
-4. **Create symlink**:
-   ```bash
-   mkdir -p ~/.local/bin
-   ln -s $(pwd)/harinezumigel-llm-stack.py ~/.local/bin/harinezumigel-llm-stack
-   chmod +x harinezumigel-llm-stack.py
-   ```
-
-   You can choose a shorter symlink name, such as `llm`, or rename the script.
-   Help examples, the startup banner, usage errors, and command hints automatically
-   use the invoked script or symlink name (for example, `llm --list`).
-
-5. **Add to PATH** (if needed):
-   ```bash
-   echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
-   source ~/.bashrc
-   ```
-
-## Configuration
-
-### 1. Environment File (`/opt/litellm/.env`)
-
-Create a `.env` file with deployment settings:
-
-```bash
-# Core paths
-MODEL_ROOT=/opt/models
-
-LITELLM_VENV_ACTIVATE=/opt/litellm/venv/bin/activate
-LITELLM_BIN=/opt/litellm/venv/bin/litellm
-
-# LiteLLM proxy bind
-LITELLM_BIND_HOST=0.0.0.0
+```dotenv
+LITELLM_BIND_HOST=192.168.100.50
 LITELLM_PORT=4000
+VLLM_HOST=127.0.0.1
+VLLM_BIND_HOST=127.0.0.1
 
-# Runtime logs are written to /opt/litellm/logs/litellm_YYYYMMDD_HHMMSS.log
-
-# Shared vLLM host / bind
-VLLM_HOST=localhost
-VLLM_BIND_HOST=0.0.0.0
-VLLM_CONTAINER_PORT=8000
-
-# Docker runtime image and mounts
-# Use NVIDIA NGC vLLM image for best GPU support.
-# IMPORTANT: Match this tag to your host NVIDIA driver version (nvidia-smi).
-# Example guidance: driver 595.x -> 26.05.post1-py3, driver 580.x -> 25.11-py3.
-VLLM_DOCKER_IMAGE=nvcr.io/nvidia/vllm:26.05.post1-py3
-VLLM_MODEL_VOLUME=/opt/models:/models
-VLLM_CACHE_VOLUME=/opt/vllm-cache:/root/.cache/huggingface
-
-# Optional auto-port range
-VLLM_AUTO_PORT_START=8001
-VLLM_AUTO_PORT_END=8010
-
-# API keys
-LITELLM_MASTER_KEY=sk-change-me
-LOCAL_VLLM_API_KEY=sk-change-me
-
-# Backend ports (one per model)
-LLAMA_GUARD3_8B_PORT=8001
-QWEN3_CODER_NEXT_PORT=8002
-
-# Full API bases (use variable expansion)
-LLAMA_GUARD3_8B_API_BASE=http://${VLLM_HOST}:${LLAMA_GUARD3_8B_PORT}/v1
-QWEN3_CODER_3_NEXT_API_BASE=http://${VLLM_HOST}:${QWEN3_CODER_NEXT_PORT}/v1
+MISTRAL_7B_PORT=8001
+MISTRAL_7B_API_BASE=http://${VLLM_HOST}:${MISTRAL_7B_PORT}/v1
 ```
 
-Inline comments separated by whitespace are supported, for example
-`VLLM_HOST=localhost # backend host`. Comments are removed before variable
-expansion, so API URLs retain the configured backend ports. Quote values that
-contain a literal whitespace-separated `#`; embedded hashes such as
-`secret#suffix` are preserved.
+Configure Copilot's API base URL as `http://192.168.100.50:4000/v1` and use
+your `LITELLM_MASTER_KEY` for authentication. The request path is:
 
-### NVIDIA Driver / vLLM Image Compatibility
+```text
+Copilot -> 192.168.100.50:4000 (LiteLLM) -> 127.0.0.1:8001 (Mistral)
+                                      -> 127.0.0.1:8003 (Guard)
+```
 
-`VLLM_DOCKER_IMAGE` must support the host CPU architecture and NVIDIA GPU, and
-must be compatible with the NVIDIA driver loaded on the host.
-If these do not match, vLLM containers can fail at startup with driver/library
-compatibility errors.
+`LITELLM_BIND_HOST` is the supported setting; **`LITELLM_HOST` is not used**.
+Binding LiteLLM to its LAN IP is sufficient for LAN clients; `0.0.0.0` is not
+required. Allow only intended clients through the firewall, and restrict access
+to LiteLLM's `/ui` admin route.
 
-On model startup, the launcher runs a lightweight compatibility probe (`docker run --gpus all ...`).
-If a mismatch is detected, it prints a warning with parsed driver requirements when available.
-Startup then continues, but the container launch may still fail.
+**Bind address and routing address serve different purposes:**
 
-This probe runs on `--start` paths (including `--recreate` and starting a stopped container).
-It does not run on `--stop`.
+- `VLLM_BIND_HOST` selects the host interface on which Docker publishes backend
+  ports. `VLLM_HOST` supplies the address LiteLLM connects to through the
+  `*_API_BASE` URLs.
+- If only the host-based LiteLLM proxy needs backend access, prefer
+  `VLLM_BIND_HOST=127.0.0.1` and `VLLM_HOST=127.0.0.1`. Clients can access the
+  proxy without direct network access to the backends.
+- If direct backend access is needed on a specific network interface, use that
+  interface's host IP for both values, for example:
 
-Check your current host driver:
+  ```bash
+  VLLM_BIND_HOST=192.168.100.50
+  VLLM_HOST=192.168.100.50
+  ```
+
+  This limits the bind to that address, rather than all interfaces, but still
+  permits network access through it subject to firewall rules and authentication.
+  Do not leave `VLLM_HOST=localhost` with this restricted bind: loopback is a
+  different address, so LiteLLM cannot reach the published backend port there.
+- `VLLM_BIND_HOST=0.0.0.0` listens on all IPv4 interfaces, including loopback;
+  it is not needed for the same-host setup above. Restrict the bind to the
+  interface actually needed instead of exposing every interface.
+
+Changing `VLLM_BIND_HOST` requires recreating affected backend containers.
+Changing `LITELLM_BIND_HOST`, `VLLM_HOST`, or the backend URLs requires restarting
+LiteLLM. Existing containers retain their original bind until recreated.
+If your backends already bind to `127.0.0.1` and only `VLLM_HOST` was wrong,
+correct it and restart only LiteLLM; no backend recreation is needed:
 
 ```bash
-nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n1
+harinezumigel-llm-stack litellm --stop &&
+  harinezumigel-llm-stack litellm --start
 ```
 
-Check the configured image tag:
+Each backend needs a distinct port and a matching `*_API_BASE`. The example uses
+8003 for Guard, 8013 for the 14B judge, and 8005 for `coder`; LiteLLM uses 4000.
+The launcher expands env references. Whitespace-separated inline comments are
+supported; quote values containing a literal whitespace-separated `#`.
+
+Every model needs an explicit `model_info.model_dir`, matching a directory
+under `MODEL_ROOT`, for example:
+
+```text
+/opt/models/
+├── mistral-7b-instruct-v0.3/
+├── llama-guard3-8b/
+├── Qwen2.5-14B-Instruct/
+└── Qwen3-Coder-Next-AWQ/
+```
+
+Download each model's weights, tokenizer, and configuration files from its
+upstream repository into the matching directory under `/opt/models` (the
+example `MODEL_ROOT`).
+
+> ❗ **Important**
+> Complete any upstream access or license acceptance requirements before downloading.
+
+If you choose a different root, update both
+`MODEL_ROOT` and `VLLM_MODEL_VOLUME` to match.
+
+For example, download Mistral into the directory used by its supplied entry:
 
 ```bash
-grep '^VLLM_DOCKER_IMAGE=' /opt/litellm/.env
+hf download mistralai/Mistral-7B-Instruct-v0.3 \
+  --local-dir /opt/models/mistral-7b-instruct-v0.3
 ```
 
-When you change `VLLM_DOCKER_IMAGE`, recreate model containers so they pick up
-the new image:
+> ❗ **Important**
+> The launcher does not download model files. Missing model directories block
+> startup. Keep model files and other persistent data on mounted host storage, never
+> only inside containers.
 
-```bash
-harinezumigel-llm-stack <model-or-alias> --start --recreate
-```
+Use `--local-dir` to download into the configured model directory. Without it,
+`hf download` normally stores files in the Hugging Face cache instead.
 
-### 2. LiteLLM Config (`/opt/litellm/config.yaml`)
 
-The launcher derives this path from `INSTALLED_BASE / "config.yaml"`.
-The `LITELLM_CONFIG` environment variable is no longer used.
+The deployment base is currently fixed as `/opt/litellm` in the launcher and
+must exist even for help/list operations. Deployment settings are read from
+`/opt/litellm/config/env`, model configuration from
+`/opt/litellm/config/config.yaml`, and logs are stored in `/opt/litellm/logs`.
+`LITELLM_CONFIG` is not used.
 
-Define your model deployments:
+### config.yaml guide: models, groups, and runtime settings
+
+Use `/opt/litellm/config/config.yaml` to define model entries, reusable groups,
+and proxy settings. The following sections explain these parts together.
+
+#### A realistic Mistral entry
+
+This shortened example illustrates the supplied Mistral 7B profile and how its
+`mistral` alias connects it to the `rag` group. It is for reference: **do not
+replace or edit the existing `mistral_7b` entry for this walkthrough**, and do not
+add a duplicate model or a second `model_list` key. The Guard, judge, and coder
+entries also remain as supplied.
 
 ```yaml
 model_list:
-  # Safety / moderation model
-  - model_name: llama_guard3_8b
+  - model_name: mistral_7b
     litellm_params:
       litellm_provider: openai
-      model: openai/llama_guard3_8b
-      api_base: os.environ/LLAMA_GUARD3_8B_API_BASE
+      model: openai/mistral_7b
+      api_base: os.environ/MISTRAL_7B_API_BASE
       api_key: os.environ/LOCAL_VLLM_API_KEY
-      request_timeout: 60
-      temperature: 0.0
-      top_p: 1.0
+      request_timeout: 90
     rebuild: true
     model_info:
-      model_dir: llama-guard3-8b
-      context_length: 2048
-      max_input_tokens: 1536
-      max_output_tokens: 64
-      max_tokens: 64
-      gpu_memory_utilization: 0.20
-      ipc: host
-      max_num_seqs: 8
-      max_num_batched_tokens: 2048
-      dtype: auto
-      cache_creation_input_token_cost: 0
-      cache_read_input_token_cost: 0
-      input_cost_per_token: 0
-      output_cost_per_token: 0
-      description: "Llama Guard 3 8B safety/moderation model"
-      detail: "Meta Llama Guard 3 for content moderation tasks"
-      alias: "guard"
-      license: "See upstream model license"
-      upstream: "https://huggingface.co/meta-llama/Llama-Guard-3-8B"
-
-  # Primary coding / agentic model
-  - model_name: Qwen3-Coder-Next-AWQ
-    litellm_params:
-      litellm_provider: openai
-      model: openai/Qwen3-Coder-Next-AWQ
-      api_base: os.environ/QWEN3_CODER_3_NEXT_API_BASE
-      api_key: os.environ/LOCAL_VLLM_API_KEY
-      request_timeout: 240
-      temperature: 0.2
-      top_p: 0.9
-      top_k: 20
-    rebuild: true
-    model_info:
-      model_dir: Qwen3-Coder-Next-AWQ
-
-      context_length:   262144
-      max_input_tokens: 250000
-      max_output_tokens: 4096
-      max_tokens: 4096
-      gpu_memory_utilization: 0.90
-      ipc: host
-      max_num_seqs: 1
-      max_num_batched_tokens: 8192
-      quantization: compressed-tensors
-      kv_cache_dtype: fp8
+      alias: mistral
+      model_dir: mistral-7b-instruct-v0.3
       generation_config: vllm
-      enable_auto_tool_choice: true
-      tool_call_parser: qwen3_coder
-      reasoning_parser: qwen3
-      enable_prefix_caching: true
-      attention_config:
-        backend: flashinfer
-      enforce_eager: false
       override_generation_config:
-        temperature: 0.6
-        top_p: 0.95
-        top_k: 20
-
+        temperature: 0.7
+        top_p: 0.9
+      context_length: 32768
+      max_input_tokens: 28000
+      max_output_tokens: 2048
+      max_tokens: 2048
+      gpu_memory_utilization: 0.27
+      ipc: host
       dtype: auto
-      cache_creation_input_token_cost: 0
-      cache_read_input_token_cost: 0
-      input_cost_per_token: 0
-      output_cost_per_token: 0
-      description: "Qwen3-Coder-Next AWQ big-context profile"
-      detail: "262K context, fp8 KV cache, FlashInfer backend, tool-calling enabled"
-      alias: "coder"
+      max_num_seqs: 1
+      max_num_batched_tokens: 4096
+      enforce_eager: false
+      enable_prefix_caching: true
+      description: "RAG answer generation with Mistral 7B"
       license: "See upstream model license"
-      upstream: "https://huggingface.co/Qwen/Qwen3-Coder-Next"
+      upstream: "https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3"
+```
 
-router_settings:
-  routing_strategy: simple-shuffle
+These are hardware-dependent starting values, not universal sizing rules.
+The example RAG fractions are Mistral 0.27 + Guard 0.16 + judge 0.28 = 0.71;
+`coder` uses 0.90. Fractions are GPU memory budgets, not compute limits.
+Weights, KV cache, context size, concurrency, and unified-memory behavior all
+affect whether the models actually fit.
 
-litellm_settings:
-  drop_params: true
-  set_verbose: false
-  keep_alive: 15
-  debug: false
-  detailed_debug: false
-  request_timeout: 240
-  json_logs: true
-  turn_off_message_logging: true
-  redact_user_api_key_info: true
+Keep proxy authentication configured at the YAML top level:
 
+```yaml
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
 ```
 
-In my experience, `qwen3-coder-30b-a3b-instruct` worked well for coding tasks. Its example configuration is included in [config.yaml.example](config.yaml.example).
+**Names matter:** `model_info.alias` is a case-sensitive CLI shortcut and must
+be unique. It does not rename an API model. With this entry, vLLM serves
+`mistral_7b`, LiteLLM routes `openai/mistral_7b`, and API clients request
+`"model": "mistral_7b"` regardless of which CLI name started it.
 
-## Usage
+#### Define reusable groups
 
-### List Configured Models
+Replace the top-level `model_groups` mapping in your installed YAML with this
+mapping, alongside `model_list`. The supplied example already has `rag` and
+`quick`; **add `coding` before using the switching commands**:
 
-```bash
-harinezumigel-llm-stack --list
-# or simply (no arguments also shows the list):
-harinezumigel-llm-stack
+```yaml
+model_groups:
+  rag:
+    - mistral
+    - guard
+    - judge
+    - litellm
+  quick:
+    - mistral
+    - guard
+  coding:
+    - coder
+    - litellm
 ```
 
-This displays all configured models with their settings, including any defined aliases and descriptions. The alias summary table shows each alias, the model it maps to, and a short description (from `model_info.description`).
+Members are configured model names, aliases, or LiteLLM targets. Nested groups
+and `all` are not allowed. Selection is ordered, with duplicates removed in
+first-seen order. Positional models and `--group` cannot be combined.
+Putting LiteLLM last starts it after backend readiness; stop operations also
+follow the declared order.
 
-### Start a Model Backend
+#### Additional configuration keys
 
-```bash
-# Start with default settings (reuses existing container if available)
-harinezumigel-llm-stack llama_guard3_8b --start
+All model entries require `context_length`, `max_input_tokens`,
+`max_output_tokens`, and `gpu_memory_utilization` under `model_info`, plus
+`model_dir` for startup. `rebuild: true` belongs at the **model entry level**,
+not inside `model_info`, and permits explicit recreation.
 
-# Start using an alias (if configured in model_info.alias)
-harinezumigel-llm-stack coder --start
+| Optional `model_info` fields | Purpose |
+|---|---|
+| `alias`, `description`, `detail`, `license`, `upstream` | CLI naming and metadata |
+| `dtype`, `quantization`, `kv_cache_dtype` | Weight / cache precision; match the model and image |
+| `max_num_seqs`, `max_num_batched_tokens` | Concurrency and batching |
+| `ipc`, `enforce_eager`, `enable_prefix_caching`, `enable_chunked_prefill` | Docker IPC and vLLM execution settings |
+| `generation_config` | Generation config source; defaults to `vllm`, avoiding inherited model defaults |
+| `override_generation_config` | Backend generation defaults, forwarded as JSON to vLLM |
+| `attention_backend`, `attention_config` | Attention implementation settings |
+| `compilation_config`, `structured_outputs_config`, `speculative_config` | Version-dependent vLLM config objects or JSON strings |
+| `enable_auto_tool_choice`, `tool_call_parser`, `reasoning_parser`, `reasoning_config` | Tool calling and reasoning parsing |
 
-# Start with explicit port (works with both name and alias)
-harinezumigel-llm-stack Qwen3-Coder-Next-AWQ --start --port 8003
-harinezumigel-llm-stack coder --start --port 8003  # same, using alias
+Config objects are serialized to JSON for vLLM. Check the selected image's
+schema: the launcher does not validate every forwarded setting, and values
+such as `compilation_config.mode: max-autotune` are not supported everywhere.
+A parser nested in `reasoning_config` is moved to `--reasoning-parser`;
+conflicting parsers and legacy `enable_reasoning` / `enable_thinking` keys
+there are rejected.
 
-# Start with automatic port allocation
-harinezumigel-llm-stack llama_guard3_8b --start --auto-port
+Set backend generation defaults in `model_info.override_generation_config`,
+a YAML mapping forwarded as JSON to vLLM's `--override-generation-config`:
 
-# Recreate container (removes and rebuilds)
-harinezumigel-llm-stack Qwen3-Coder-Next-AWQ --start --recreate
-harinezumigel-llm-stack coder --start --recreate  # same, using alias
+```yaml
+model_info:
+  generation_config: vllm
+  override_generation_config:
+    temperature: 0.7
+    top_p: 0.9
+    repetition_penalty: 1.03
 ```
 
-`--recreate` is only allowed when that model entry in `config.yaml` explicitly sets top-level `rebuild: true`.
-If `rebuild` is missing or not `true`, the command exits with an error.
+These settings are **active defaults used by vLLM**. Set `generation_config`
+under the model's `model_info` in `/opt/litellm/config/config.yaml`, alongside
+`override_generation_config`, as shown above. `auto` and `vllm` are literal
+values defined by vLLM, not names of models or groups. The launcher passes
+this setting as `--generation-config`; if omitted, the launcher explicitly
+passes `vllm` (rather than using vLLM's own `auto` default).
+It determines the starting point:
 
-### Override Runtime Parameters
+- `auto` (explicit opt-in): load the model's generation configuration, then replace
+  the specified values with those in `override_generation_config`.
+- `vllm` (the launcher default): skip the model's generation configuration and
+  apply your overrides to vLLM's built-in defaults.
+
+Use generation-config keys supported by the vLLM version in your container
+image. The launcher forwards the mapping rather than filtering unsupported
+keys. To apply changed defaults to an existing container, use
+`--start --recreate` (requires `rebuild: true`).
+
+Keep deployment sampling defaults in `model_info.override_generation_config`,
+not duplicated in `litellm_params`. The launcher rejects a parameter defined in
+both locations, even when the values are identical. Existing proxy-only defaults
+in `litellm_params` remain supported and are handled by LiteLLM. The sampling
+summary labels the two sources as `backend default` and `proxy default`;
+these are configured defaults, not necessarily the values used by each request.
+
+Explicit request sampling values take precedence over backend sampling defaults.
+For example, a VS Code client sending `temperature: 0.2` overrides a backend
+default of `0.7`, provided the client sends it and LiteLLM forwards it.
+Server-wide limits still apply; for example,
+`max_new_tokens` in the generation configuration can cap output length.
+
+**Migrating an existing configuration:** move sampling defaults such as
+`temperature`, `top_p`, and penalties from `litellm_params` into
+`model_info.override_generation_config`, resolving conflicting values explicitly.
+Keep routing, authentication, and proxy settings in `litellm_params`. Set
+`generation_config: auto` explicitly if you want to retain inherited model
+generation defaults; otherwise the launcher now uses `vllm`. Recreate backend
+containers to apply the new startup settings, and restart LiteLLM after changing
+its configuration.
+
+## Run and switch workloads
+
+After installing, downloading model files, and configuring the groups above:
 
 ```bash
-# Override context length and GPU memory (works with alias)
-harinezumigel-llm-stack Qwen3-Coder-Next-AWQ --start \
-  --context-length 131072 \
-  --max-input-tokens 125000 \
-  --max-output-tokens 4096 \
-  --gpu-memory-utilization 0.85
-
-# Same using alias
-harinezumigel-llm-stack coder --start \
-  --context-length 131072 \
-  --gpu-memory-utilization 0.85
-
-# Limit concurrent requests
-harinezumigel-llm-stack llama_guard3_8b --start --max-num-seqs 4
+harinezumigel-llm-stack --list                 # aliases and groups
+harinezumigel-llm-stack                        # detailed model settings
+# Preview container creation without launching model backends.
+harinezumigel-llm-stack --group rag --start --dry-run
+# Create and start missing backend containers; reuse any existing ones.
+harinezumigel-llm-stack --group rag --start
+harinezumigel-llm-stack --group rag --ps
 ```
 
-### Dry Run Mode
-
-Preview changes without executing:
+No separate `docker create` command is needed: `--start` creates missing vLLM
+containers from the configured image, mounts the model files, and starts them.
+LiteLLM is launched separately as a host process. To explicitly replace existing
+backend containers after changing their configuration, preview and then recreate:
 
 ```bash
-harinezumigel-llm-stack llama_guard3_8b --start --recreate --dry-run
+harinezumigel-llm-stack --group rag --start --recreate --dry-run
+harinezumigel-llm-stack --group rag --start --recreate
 ```
 
-### Start LiteLLM Proxy
+Recreation requires `rebuild: true` on each selected vLLM entry and removes
+container-local data; mounted model files remain on the host.
+
+Before switching, stop client traffic. Stop the old group **successfully**
+before starting the new one:
 
 ```bash
-# Start in background
-harinezumigel-llm-stack litellm --start
+# RAG -> coding (also stops/restarts the shared proxy)
+harinezumigel-llm-stack --group rag --stop &&
+  harinezumigel-llm-stack --group coding --start
 
-# Start and follow logs (foreground, with formatted JSON stacktraces)
-harinezumigel-llm-stack litellm --start --show-log
-
-# Stop the proxy
-harinezumigel-llm-stack litellm --stop
+# Coding -> RAG
+harinezumigel-llm-stack --group coding --stop &&
+  harinezumigel-llm-stack --group rag --start
 ```
 
-`harinezumigel-llm-stack litellm --start` enforces a single-instance policy per config path.
-If another LiteLLM process is already running with the same `--config` path,
-startup exits and asks you to stop the existing instance first.
+This intentionally includes `litellm` in both groups, so switching restarts the
+proxy as well as changing GPU workloads. If you want the proxy to stay up,
+omit it from both groups and manage it separately with `litellm --start/--stop`.
+LiteLLM can list configured models whose backends are currently stopped;
+requests to those backends will fail.
 
-LiteLLM output is written to timestamped files under `/opt/litellm/logs`,
-for example `/opt/litellm/logs/litellm_20261018_154215.log`.
-All operations abort at script startup with an error if `/opt/litellm` is missing,
-before loading environment settings.
-The `logs` directory is created when needed, except during dry runs or cleanup.
-Cleanup checks that the directory exists and removes only `.log` files inside it,
-leaving the directory and logs elsewhere untouched. Symlinks are not followed.
-The installation base is defined by `INSTALLED_BASE` in the launcher; log paths
-are constructed from it without a legacy log-file setting.
-
-The proxy will be available at `http://localhost:4000` (or your configured port).
-
-**Admin UI**: The `/ui` route is always served by LiteLLM — it cannot be disabled via configuration. API authentication behavior is controlled by your LiteLLM `master_key` configuration. To block the UI, use a reverse proxy (e.g. nginx `location /ui { return 403; }`) or a firewall rule.
-
-**Note**: When using `--show-log`, JSON log lines with `stacktrace` fields are automatically formatted to display stack traces with real newlines for readability.
-
-### View Logs
+If you have other models running, stopping `rag` alone will not free their
+memory. Inspect `all --ps`, or deliberately stop the whole configured stack:
 
 ```bash
-# View recent logs (last 200 lines, works with alias)
-harinezumigel-llm-stack Qwen3-Coder-Next-AWQ --show-log
-harinezumigel-llm-stack coder --show-log  # same, using alias
+harinezumigel-llm-stack all --stop --dry-run
+harinezumigel-llm-stack all --stop
+```
 
-# Follow logs in real-time
-harinezumigel-llm-stack llama_guard3_8b --show-log --follow
-harinezumigel-llm-stack coder --show-log --follow  # using alias
+`all --stop` stops LiteLLM first, then configured vLLM models.
 
-# Show more log lines
-harinezumigel-llm-stack Qwen3-Coder-Next-AWQ --show-log --tail 500
+### Startup, reuse, and failures
 
-# Show log file path
-harinezumigel-llm-stack llama_guard3_8b --show-log-path
-harinezumigel-llm-stack litellm --show-log-path
+- Grouped `--start --recreate` validates the entire selection first, then stops
+  all running vLLM containers belonging to the selected models (including old
+  port variants) before checking the combined new memory budget and starting
+  replacements sequentially. Containers outside the selection are untouched.
+  If the memory check fails, selected backends remain stopped. LiteLLM is
+  restarted only if included in the selection.
+- Batch startup validates selected names, directories, runtime settings, ports,
+  and recreation permissions before launching any selected vLLM container.
+  It starts targets sequentially and waits for each backend's HTTP `/health`
+  to return 200. Docker's `running` state alone is not readiness.
+- Already healthy reused backends do not replay old logs. LiteLLM starts
+  detached, without the vLLM readiness monitor.
+- `--startup-timeout SECONDS` sets a per-backend deadline (default 900).
+  `--quiet` suppresses routine startup logs, not progress or failure diagnostics.
+- Failure or timeout stops the sequence with a nonzero exit and diagnostics.
+  Earlier starts remain running; later targets are not attempted. Ctrl+C
+  stops monitoring/further starts and leaves backends running (exit 130).
+- Backend ports and vLLM runtime settings are configured in `config.yaml`;
+  the CLI does not override them. Request-level sampling parameters remain
+  available to API clients.
+- Ordinary starts reuse running containers or start stopped containers with
+  their **original Docker arguments**. To apply changed image, mount, context,
+  or other startup settings, use `--start --recreate`. Every selected vLLM
+  entry must permit this via top-level `rebuild: true`.
+- Grouped starts reuse a LiteLLM process matching the config path without
+  reloading it. Grouped `--start --recreate` restarts LiteLLM in group order;
+  this does not require a `rebuild` setting for the proxy.
+  Standalone `litellm --start` instead refuses a matching existing instance;
+  stop then start it to reload configuration. An occupied port is not proof
+  of a reusable proxy.
 
-# Show all log paths
-harinezumigel-llm-stack all --show-log-path
-harinezumigel-llm-stack all --show-log  # summary paths for vLLM + LiteLLM
+❗ **Important: Dry-run is not offline**
 
-# Clean log files
+- It avoids model launches/recreation and readiness waiting, but still inspects
+  Docker/GPU state.
+- For backends needing launch, it checks available memory (dedicated GPU VRAM
+  or GB10 shared system memory) and runs a short-lived GPU/image compatibility
+  container.
+- If missing locally, Docker pulls the vLLM server image specified by
+  `VLLM_DOCKER_IMAGE` in `/opt/litellm/config/env`
+  (`nvcr.io/nvidia/vllm:26.05.post1-py3` in the example configuration).
+  This is the container image, not the model files; an existing local image is
+  not updated by this check.
+- Confirmed driver-version mismatches abort startup and dry runs; other
+  compatibility-probe errors are warnings.
+- Available memory must cover the configured GPU 0 memory budget; batch planning
+  can also check the combined budget for new starts. Insufficient memory or
+  unreadable memory data abort both startup and dry-run.
+- On NVIDIA GB10, unavailable GPU memory counters use `/proc/meminfo`
+  `MemAvailable` and `MemTotal` instead, matching DGX Dashboard's shared system
+  memory counters. Output explicitly identifies shared system memory; CPU and
+  GPU workloads compete for this pool. Other GPUs do not use this fallback.
+- These checks do not guarantee successful loading.
+- During grouped recreation dry-runs, selected containers remain running.
+  If any selected backend is running, the memory preview checks the new budget
+  against total capacity only and warns that post-stop available memory cannot
+  be verified. The real start checks availability after stopping selected
+  backends; individual checks still run before each replacement launch.
+
+## CLI reference
+
+Use `harinezumigel-llm-stack --help` for the full command help. A model's full
+name and its alias are interchangeable in CLI selections.
+
+| Task | Command |
+|---|---|
+| Select several backends without a group | `harinezumigel-llm-stack mistral guard judge --start` |
+| Wait for one backend with bounded startup logs | `harinezumigel-llm-stack mistral --start --startup-logs` |
+| Use a different readiness deadline | `harinezumigel-llm-stack --group rag --start --startup-timeout 600` |
+| Preview selected recreation | `harinezumigel-llm-stack --group rag --start --recreate --dry-run` |
+| Container status for configured models | `harinezumigel-llm-stack all --ps` |
+| Recent grouped log snapshots | `harinezumigel-llm-stack --group rag --show-log --tail 50` |
+| Follow one backend | `harinezumigel-llm-stack mistral --stream-log` |
+| Follow proxy logs | `harinezumigel-llm-stack litellm --show-log --follow` |
+| Locate Docker and proxy logs | `harinezumigel-llm-stack all --show-log-path` |
+| Clean proxy log files | `harinezumigel-llm-stack litellm --clean-log` |
+
+`--stream-log` is shorthand for `--show-log --follow`; do not combine them.
+Single-model starts without log streaming print a reminder to add `--stream-log`,
+plus a command to follow the running model's logs. After group/batch startup,
+the launcher prints separate `<model> --stream-log` commands; streaming a whole
+group indefinitely is not supported. Dry-runs do not print these reminders.
+Batch selections reject indefinite following; follow one target separately
+after startup. `all --show-log` shows log paths rather than merged streams.
+JSON-escaped stack traces are expanded for readability.
+
+Proxy logs are timestamped under `/opt/litellm/logs`; this directory is created
+when needed, except during dry runs or cleanup. Proxy cleanup removes only
+`.log` files inside that directory, without following symlinks. Backend/all
+`--clean-log` can truncate Docker logs: inspect paths and preview with
+`--dry-run` before deleting diagnostics.
+
+### Clean logs
+
+Use `--clean-log` with a model name or alias, a group, `litellm`, or `all`:
+
+```bash
+# Preview cleanup for the selected group without changing any files.
+harinezumigel-llm-stack --group rag --clean-log --dry-run
+
+# Clean only the selected group's logs.
+harinezumigel-llm-stack --group rag --clean-log
+
+# Other selections:
+harinezumigel-llm-stack guard --clean-log
 harinezumigel-llm-stack litellm --clean-log
 harinezumigel-llm-stack all --clean-log
 ```
 
-**Log Formatting**: The tool automatically formats JSON log output from LiteLLM and vLLM. Stack traces embedded in JSON (with escaped `\n`) are expanded to real newlines for readability.
+- **vLLM backends:** truncate the managed Docker log files; containers are not
+  stopped, removed, or recreated.
+- **LiteLLM:** remove managed `.log` files under `/opt/litellm/logs`, without
+  following symlinks. If the directory exists but contains no managed log files,
+  cleanup reports `Status: ✓ Cleaned`. A missing directory is left absent and
+  reported as skipped.
+- **Groups:** clean only the selected members' logs. Proxy logs are included
+  only if `litellm` is a member of the group.
+- **`all`:** clean configured vLLM backend logs and LiteLLM proxy logs.
 
-### Stop Containers
+Cleanup deletes diagnostic history, not model weights or configuration. Services
+are not restarted; running backends can immediately write new log entries.
+Preview with `--dry-run` and save any logs you need before cleaning.
 
-```bash
-# Stop a specific model (works with alias)
-harinezumigel-llm-stack Qwen3-Coder-Next-AWQ --stop
-harinezumigel-llm-stack coder --stop  # same, using alias
+### Call the proxy
 
-# Stop all configured models
-harinezumigel-llm-stack all --stop
-
-# Stop LiteLLM proxy
-harinezumigel-llm-stack litellm --stop
-```
-
-## Model Directory
-
-Each model must have `model_info.model_dir` set explicitly in `config.yaml`.
-The value must exactly match a directory name inside `MODEL_ROOT` (set in `.env`).
-
-```yaml
-model_info:
-  model_dir: Qwen3-Coder-Next-AWQ   # must exist as $MODEL_ROOT/Qwen3-Coder-Next-AWQ
-```
-
-The path resolved at runtime is:
-
-```
-$MODEL_ROOT / model_dir
-```
-
-If `model_dir` is missing from the config or the directory does not exist, the
-start command will fail with an error before any Docker operation is attempted.
-
-**Example layout:**
-```
-/opt/models/
-  llama-guard3-8b/
-  llama3.1-8b/
-  mistral-7b-instruct-v0.3/
-  qwen2.5-32b-awq/
-  Qwen3-Coder-Next-AWQ/
-  Qwen3.6-27B/
-  deepseek-coder-6.7b-instruct/
-  deepseek-v4-pro-70b/
-```
-
-Corresponding `config.yaml` entries:
-```yaml
-model_info:
-  model_dir: llama-guard3-8b          # llama_guard3_8b
-  model_dir: llama3.1-8b              # llama_3_1_8b
-  model_dir: mistral-7b-instruct-v0.3 # mistral_7b
-  model_dir: qwen2.5-32b-awq          # qwen2_5_32b_awq
-  model_dir: Qwen3-Coder-Next-AWQ     # Qwen3-Coder-Next-AWQ
-  model_dir: Qwen3.6-27B              # qwen3.6-27b
-  model_dir: deepseek-coder-6.7b-instruct  # deepseek-coder-6.7b-instruct
-  model_dir: deepseek-v4-pro-70b      # deepseek-v4-pro-70b
-```
-
-### Model Entry Reference
-
-| Field | Required | Description |
-|---|---|---|
-| `rebuild` | yes (for recreate) | Top-level field under each `model_list` entry. Must be explicitly set to `true` to allow `--recreate`. If missing or not `true`, `--recreate` is blocked. |
-
-### Model `model_info` Reference
-
-| Field | Required | Description |
-|---|---|---|
-| `model_dir` | yes | Directory name inside `MODEL_ROOT` |
-| `context_length` | yes | Maximum total tokens (prompt + completion) |
-| `max_input_tokens` | yes | Maximum prompt tokens |
-| `max_output_tokens` | yes | Maximum completion tokens |
-| `gpu_memory_utilization` | yes | Fraction of GPU VRAM to allocate (0.0–1.0) |
-| `ipc` | no | Docker IPC mode; passed as `--ipc=<value>` (e.g. `host`) |
-| `dtype` | no | Model weight dtype (`auto`, `float16`, `bfloat16`) |
-| `alias` | no | Short name for CLI commands (e.g. `coder`) |
-| `description` | no | One-line description shown in `--list` alias table |
-| `detail` | no | Longer detail line shown in full model listing |
-| `override_generation_config` | no | Sampling parameters applied at the vLLM server level (e.g. `temperature`, `top_p`, `top_k`, `repetition_penalty`). Displayed in `--list` and at LiteLLM startup. |
-| `quantization` | no | Quantization scheme (e.g. `compressed-tensors`, `awq`) |
-| `kv_cache_dtype` | no | KV cache precision (e.g. `fp8`) |
-| `generation_config` | no | Generation config file or `vllm` |
-| `enable_prefix_caching` | no | Enable prefix/prompt caching |
-| `attention_backend` | no | Attention implementation (e.g. `flashinfer`) |
-| `attention_config` | no | Attention config object or JSON string passed to vLLM (`--attention-config`) |
-| `compilation_config` | no | Compilation config object or JSON string passed to vLLM (`--compilation-config`); accepted fields and values depend on the vLLM version |
-| `structured_outputs_config` | no | Structured-output config object or JSON string passed to vLLM (`--structured-outputs-config`), including the `backend` selection (e.g. `xgrammar`) |
-| `enforce_eager` | no | Disable CUDA graphs |
-| `enable_auto_tool_choice` | no | Enable automatic tool/function calling |
-| `reasoning_config` | no | Reasoning config object or JSON string for extra options (`--reasoning-config`), e.g. `reasoning_start_str`, `reasoning_end_str`. A nested `reasoning_parser` is moved to `--reasoning-parser`; conflicting parser values are rejected. |
-| `tool_call_parser` | no | Parser for tool calls (e.g. `qwen3_coder`) |
-| `reasoning_parser` | no | Parser for reasoning traces (e.g. `qwen3`) |
-| `max_num_seqs` | no | Maximum concurrent sequences |
-| `max_num_batched_tokens` | no | Maximum tokens per batch |
-| `license` | no | License identifier or URL |
-| `upstream` | no | Upstream model URL (e.g. HuggingFace page) |
-
-**Sampling parameters** (`override_generation_config`) are request-time parameters in vLLM — not server startup flags. They are passed in API requests and are shown in informational output. Parameters set in `litellm_params` (e.g. `temperature`, `top_p`) are also shown, labeled by source (`model-spec` vs `litellm`).
-
-### Compilation and Structured Outputs
-
-Configure these as sibling fields under a model's `model_info`:
-
-```yaml
-model_info:
-  compilation_config:
-    mode: max-autotune
-  structured_outputs_config:
-    backend: xgrammar
-```
-
-The launcher serializes mappings as JSON and forwards each setting as one vLLM
-CLI argument. JSON strings are also accepted and forwarded unchanged. Omitted
-settings leave the corresponding vLLM defaults in place. Both settings appear
-in `--list`, dynamic help, and the vLLM startup summary.
-
-These values are forwarded without schema validation by the launcher. Check
-your Docker image's vLLM configuration schema before using them; in particular,
-`mode: max-autotune` is not supported by every vLLM version. The example shows
-the requested configuration, not a guarantee of image compatibility.
-
-Existing containers retain their original startup settings. To apply changes,
-set top-level `rebuild: true` on the model entry and use
-`harinezumigel-llm-stack <model-or-alias> --start --recreate`.
-See [config.yaml.example](config.yaml.example) for the complete model example.
-
-## Model Aliases
-
-You can define short, memorable aliases for models in `config.yaml` to simplify command-line usage. Aliases are optional and defined in the `model_info` section:
-
-```yaml
-model_list:
-  - model_name: Qwen3-Coder-Next-AWQ
-    litellm_params:
-      # ... your litellm params ...
-    model_info:
-      alias: coder  # Optional short alias
-      model_dir: Qwen3-Coder-Next-AWQ
-      # ... rest of model_info ...
-
-  - model_name: llama_guard3_8b
-    litellm_params:
-      # ... your litellm params ...
-    model_info:
-      alias: guard  # Optional short alias
-      model_dir: llama-guard3-8b
-      # ... rest of model_info ...
-```
-
-**Using Aliases:**
-
-All commands that accept a model name also accept aliases:
+With the RAG group running, use the target host's LAN IP from the example above
+(replace it if yours differs) and replace the placeholder with your proxy master key:
 
 ```bash
-# These are equivalent:
-harinezumigel-llm-stack Qwen3-Coder-Next-AWQ --start
-harinezumigel-llm-stack coder --start
-
-# Works with all operations:
-harinezumigel-llm-stack coder --show-log --follow
-harinezumigel-llm-stack guard --ps
-harinezumigel-llm-stack coder --stop
+curl http://192.168.100.50:4000/v1/chat/completions \
+  -H 'Authorization: Bearer YOUR_LITELLM_MASTER_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"mistral_7b","messages":[{"role":"user","content":"Explain retrieval-augmented generation briefly."}],"max_tokens":128}'
 ```
 
-**Alias Rules:**
+This calls Mistral directly through the proxy, not the complete RAG workflow.
 
-- Aliases must be unique across all models
-- Aliases are case-sensitive
-- The `--list` command shows both model names and their aliases
-- When an alias is used, the tool displays which model it resolved to
+## Troubleshooting and safety
 
-**API Behavior with Aliases:**
+| Symptom | Check / action |
+|---|---|
+| CLI fails before showing help | Ensure `/opt/litellm`, `config/env`, and required env settings exist; use the installer. |
+| Command or imports not found | Check `~/.local/bin` is on `PATH` and its symlink points to `/opt/litellm/src/harinezumigel-llm-stack.py`, with the `hls_*.py` helpers alongside it. |
+| Model directory missing | Match `model_info.model_dir` exactly to a model directory under `MODEL_ROOT`; verify the `/models` mount. |
+| Backend/proxy port occupied | Inspect `ss -ltn` and container/process status. Fix conflicting ports/URLs; do not assume another service is reusable. |
+| Driver compatibility failure | Compare `nvidia-smi` with `VLLM_DOCKER_IMAGE` requirements. Choose a compatible image or upgrade the driver, then explicitly recreate affected containers. |
+| Insufficient VRAM / OOM | Stop the other workload first. Reduce context, concurrency, or memory budget only as appropriate; too small a budget cannot hold the weights/cache. Recreate to apply changes. |
+| Request authentication failure | Use `LITELLM_MASTER_KEY` for clients; verify `litellm_params.api_key` references `LOCAL_VLLM_API_KEY` for backends. Recreate/restart affected services after key changes. |
+| API model not found | Use YAML `model_name`, not the CLI alias; keep `litellm_params.model` consistent with the backend's served name. |
+| Configuration changes ignored | Recreate vLLM containers; stop/start LiteLLM or recreate its group to reload the proxy config. |
+| Reused proxy venv has conflicts | Run `/opt/litellm/venv/bin/pip check`; rerun the installer and choose reinstallation if needed. |
 
-If you start a backend using an alias, LiteLLM exposes that alias as the model identifier for callers. In practice, clients must send the alias in API requests.
+For startup failures, inspect the relevant model's `--show-log --tail 100`
+and preview `--start --recreate --dry-run` before changing the deployment.
+
+- Container reuse is the default. There is no standalone container-removal
+  option; removal happens implicitly during `--start --recreate`, which
+  requires `rebuild: true` on each selected vLLM model. `--stop` leaves
+  containers in place. Unselected models are not recreated.
+  Container-local data is lost on recreation.
+- Single-model, group, and `all` stop commands verify that selected backend
+  containers are no longer running. LiteLLM stops wait for the matching proxy
+  processes to exit after SIGTERM. Verification waits up to 10 seconds after
+  the stop command/signal and exits with an error if anything selected remains
+  running or its state cannot be queried. Dry-runs do not stop or wait.
+- Model lifecycle operations target configured `vllm-` containers; LiteLLM
+  process operations match its configuration path. Review selections before
+  broad operations such as `all --stop` or log cleanup.
+- Authentication is LiteLLM-controlled, not independently enforced by this
+  launcher. Use strong keys, restrict config/backup permissions, firewall
+  backend ports, and restrict the proxy and `/ui` appropriately.
+- Keep debug logging off for sensitive workloads; do not publish raw logs,
+  credentials, or request data. See [SECURITY.md](SECURITY.md) for scope and
+  vulnerability reporting.
+
+### Terminal output
+
+Headings use bold, commands/aliases/groups use accent colors, and readiness,
+warnings, and failures use status colors. No background colors are set; raw
+backend logs are unchanged. Styling is disabled for redirected output,
+unset/`dumb` `TERM`, or any `NO_COLOR` value (even empty).
+
+Set `HLS_SUCCESS_COLOR`, `HLS_FAILURE_COLOR`, `HLS_WARNING_COLOR`,
+`HLS_ACCENT_COLOR`, and `HLS_HEADING_COLOR` in the deployment env. Defaults are
+`green`, `red`, `yellow`, `cyan`, and `default`. Accepted colors are the eight
+standard terminal names, their `bright-` variants, and `default`. For
+low-contrast palettes, use `NO_COLOR=1`.
+
+## Development and project information
+
+The launcher entry point and lifecycle logic live in
+`src/harinezumigel-llm-stack.py`; `hls_selection.py`, `hls_startup.py`,
+`hls_preflight.py`, and `hls_terminal.py` separate selection, monitoring,
+GPU/image checks, and terminal presentation.
+
+From your existing checkout root:
 
 ```bash
-# If alias is "coder", callers should use:
-curl http://localhost:4000/v1/chat/completions \
-  -H "Authorization: Bearer sk-..." \
-  -H "Content-Type: application/json" \
-  -d '{"model":"coder","messages":[{"role":"user","content":"Hello"}]}'
-```
-
-**Example Output:**
-
-```bash
-$ harinezumigel-llm-stack coder --start
-Resolved alias 'coder' to model 'Qwen3-Coder-Next-AWQ'
-Starting vLLM container for model: Qwen3-Coder-Next-AWQ
-...
-```
-
-## Safety Features
-
-- **No model modification**: Does not alter model files on disk
-- **Explicit operations**: Container removal only occurs with `--recreate`
-- **Dry-run mode**: Preview all changes with `--dry-run`
-- **Container reuse**: Default behavior reuses existing containers
-- **Scoped operations**: Only manages containers with `vllm-` prefix
-- **Recreate scoping**: `--recreate` only affects the single named model/alias; requires `--start`
-- **Alias safety**: Duplicate aliases are rejected at startup; unknown aliases exit with a clear error
-- **Rebuild protection**: `--recreate` is allowed only when top-level `rebuild: true` is explicitly set for the model; missing or non-true values block recreate
-- **Single LiteLLM instance policy**: `litellm --start` refuses to launch when another LiteLLM process already runs with the same `--config` path
-- **Process safety**: Kills only LiteLLM processes matching specific patterns
-- **Port validation**: Checks port availability before binding
-- **Self-protection**: Won't kill its own process when stopping LiteLLM
-- **API authentication (LiteLLM-controlled)**: This launcher does not enforce auth itself; configure LiteLLM `master_key` to require API auth. The `/ui` static files are still served by LiteLLM.
-
-See [SECURITY.md](SECURITY.md) for vulnerability reporting and security scope.
-
-⚠️ **Important**:
-Do NOT store models or any non-reproducible data inside containers.
-Using `--recreate` removes containers, and any internal container data will be permanently lost.
-Always use host-mounted directories or Docker volumes for persistence.
-
-## Container Lifecycle
-
-### Default Behavior (Safe)
-
-```bash
-harinezumigel-llm-stack mistral-7b --start
-```
-
-1. Checks if container `vllm-mistral-7b-8001` exists
-2. If exists and running → reuses it (no change)
-3. If exists but stopped → starts it
-4. If doesn't exist → creates new container
-
-### Recreate Behavior
-
-```bash
-harinezumigel-llm-stack mistral-7b --start --recreate
-```
-
-1. Stops existing container (if running)
-2. Removes container
-3. Creates fresh container with current settings
-
-This flow is only allowed when the target model entry has top-level `rebuild: true` in `config.yaml`.
-
-> `--recreate` **only** affects the single model or alias explicitly named on the command line. It requires `--start` and will exit with an error if used without it. All other containers are left untouched.
-
-Use `--recreate` when:
-- Changing Docker run parameters
-- Updating vLLM image version
-- Changing model directory
-- Troubleshooting container issues
-
-## Advanced Examples
-
-### Deployment Script
-
-```bash
-#!/bin/bash
-# Start all models using aliases for cleaner commands
-
-harinezumigel-llm-stack guard --start --recreate
-harinezumigel-llm-stack coder --start --port 8002 --recreate
-
-# Start LiteLLM proxy
-harinezumigel-llm-stack litellm --start
-
-echo "All models started. LiteLLM available at http://localhost:4000"
-```
-
-### Health Check Script
-
-```bash
-#!/bin/bash
-# Check model container status using aliases
-
-for model in guard coder; do
-    echo "=== $model ==="
-    harinezumigel-llm-stack $model --show-log --tail 10
-    echo
-done
-
-# Or check all at once
-harinezumigel-llm-stack all --ps
-```
-
-### Quick Start/Stop with Aliases
-
-```bash
-#!/bin/bash
-# Quick commands using short aliases
-
-# Start models
-harinezumigel-llm-stack guard --start
-harinezumigel-llm-stack coder --start --gpu-memory-utilization 0.85
-
-# Check status
-harinezumigel-llm-stack guard --ps
-harinezumigel-llm-stack coder --ps
-
-# View logs
-harinezumigel-llm-stack coder --show-log --follow &
-
-# Stop when done
-harinezumigel-llm-stack all --stop
-```
-
-## Troubleshooting
-
-### Container won't start
-
-```bash
-# Check if port is in use
-netstat -tuln | grep 8001
-
-# View container logs (can use alias)
-harinezumigel-llm-stack guard --show-log --tail 100
-harinezumigel-llm-stack coder --show-log --tail 100
-
-# Recreate with dry-run to see command
-harinezumigel-llm-stack guard --start --recreate --dry-run
-
-# Force recreate (can use alias)
-harinezumigel-llm-stack coder --start --recreate
-harinezumigel-llm-stack llama_guard3_8b --start --recreate
-```
-
-### NVIDIA driver mismatch warning on start
-
-If you see a startup warning like "NVIDIA pre-run compatibility check failed":
-
-1. Check host driver version:
-
-```bash
-nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n1
-```
-
-2. Check configured image tag:
-
-```bash
-grep '^VLLM_DOCKER_IMAGE=' /opt/litellm/.env
-```
-
-3. Select a compatible image tag or upgrade the driver.
-
-4. Recreate the model container so the new image is used:
-
-```bash
-harinezumigel-llm-stack <model-or-alias> --start --recreate
-```
-
-Note: startup continues after the warning, but container launch can still fail if the mismatch remains.
-
-### API key issues
-
-Ensure `LOCAL_VLLM_API_KEY` is set in `.env` and referenced in `config.yaml`:
-
-```yaml
-litellm_params:
-  api_key: os.environ/LOCAL_VLLM_API_KEY
-```
-
-### Model directory not found
-
-Set explicit path in `config.yaml`:
-
-```yaml
-model_info:
-  model_dir: exact-directory-name
-```
-
-### Out of memory
-
-Reduce GPU memory utilization or concurrent requests:
-
-```bash
-harinezumigel-llm-stack Qwen3-Coder-Next-AWQ --start \
-  --gpu-memory-utilization 0.70 \
-  --max-num-seqs 1 \
-  --recreate
-```
-
-### Unreadable log output / stack traces
-
-The tool automatically formats JSON logs with embedded stack traces. If you see escaped `\n` sequences:
-
-1. Use the tool's `--show-log` command (formatting is automatic)
-2. For direct Docker logs: `docker logs vllm-<container>` won't have formatting
-3. LiteLLM logs with `--show-log` flag expand stacktraces for readability
-
-## Environment Variable Override
-
-Override the default `.env` location:
-
-```bash
-export HLS_ENV_FILE=/custom/path/.env
-harinezumigel-llm-stack --list
-```
-
-## Architecture
-
-```
-┌─────────────────────────────────────┐
-│  harinezumigel-llm-stack CLI        │
-│  (LLMStack class manages all state) │
-└───────────────┬─────────────────────┘
-                │
-    ┌───────────┴───────────┐
-    │                       │
-    ▼                       ▼
-┌──────────────────┐    ┌────────────────────────────┐
-│  LiteLLM Proxy   │    │   vLLM Containers          │
-│  (Host Process)  │    │   (Docker + NVIDIA GPU)    │
-│                  │    │                            │
-│  Port: 4000      │◄───┤  llama_guard3_8b: 8001     │
-│                  │    │  Qwen3-Coder-Next: 8002    │
-│  Unified API     │    │  (NGC vLLM image)          │
-└─────────┬────────┘    └──────────┬─────────────────┘
-          │                        │
-          ▼                        ▼
-    OpenAI API              Model Files
-    Compatible              (/models volume)
-```
-
-### Code Structure
-
-The tool is built around a single `LLMStack` class that manages:
-
-- **Configuration**: Loads `.env` and `config.yaml`
-- **Model management**: Resolves model names, finds directories, builds Docker commands
-- **Container lifecycle**: Start, stop, recreate, reuse existing containers
-- **Logs**: View, follow, and clean container logs (with JSON stacktrace formatting)
-- **LiteLLM proxy**: Start/stop the unified API gateway
-
-Pure utility functions remain at module level for string manipulation, type coercion, and subprocess execution.
-
-## Performance Tuning
-
-### Context Length vs. Memory
-
-Larger context windows require more GPU memory:
-
-- 262K context (Qwen3-Coder-Next): ~0.90 GPU memory, fp8 kv_cache, FlashInfer backend
-- 32K context (typical): ~0.85-0.90 GPU memory utilization
-- 16K context: ~0.75-0.85 GPU memory utilization
-- 2K context (Llama Guard): ~0.20 GPU memory (small safety model)
-
-### Concurrent Requests
-
-`max_num_seqs` controls maximum concurrent requests:
-
-- Higher values → better throughput, more memory
-- Lower values → lower memory, potential queuing
-- Recommended: 1 for very large context models, 2-8 for smaller models
-
-### Advanced vLLM Features
-
-For large context models (>100K tokens):
-
-```yaml
-model_info:
-  attention_backend: flashinfer  # Required for very large context
-  kv_cache_dtype: fp8            # Compress KV cache
-  quantization: compressed-tensors  # AWQ/GPTQ models
-  enable_prefix_caching: true    # Cache system prompts
-```
-
-## Development and Testing
-
-### Running Tests
-
-The project includes a comprehensive test suite (`test_harinezumigel_llm_stack.py`) with 43 tests covering configuration parsing, model resolution, Docker command generation, sampling parameter formatting, and safety guards.
-
-**Requirements:**
-- Python 3.10+
-- PyYAML (for YAML parsing)
-- pytest (for running tests)
-
-**Setup:**
-
-When cloning from GitHub, you must create a virtual environment in the project directory and install the required test dependencies:
-
-```bash
-# Clone the repository (if you haven't already)
-git clone <your-repo-url>
-cd <repo-directory>
-
-# Create a virtual environment in the project directory
 python3 -m venv .venv
-
-# Activate the virtual environment
-source .venv/bin/activate  # On Linux/macOS
-# OR
-.venv\Scripts\activate     # On Windows
-
-# Install required packages
-pip install pyyaml pytest
-
-# Run the test suite
-pytest -q
-
-# Alternative: If pytest command not found, use python -m pytest
-python -m pytest -q
-
-# Or run with the full venv path (without activation)
-.venv/bin/pytest -q
+.venv/bin/pip install pyyaml pytest
+.venv/bin/python -m pytest tests/ -q
 ```
 
-**Expected Output:**
-```
-..........................................                                   [100%]
-43 passed in 0.16s
-```
+Tests mock Docker/GPU operations; startup tests also use local subprocesses to
+verify readiness and log-follower cleanup. Their bootstrap uses
+`config/env.example`, without requiring an installed deployment. Standard
+library discovery also works: `.venv/bin/python -m unittest discover -s tests`.
+The development `.venv` is separate from the proxy's `/opt/litellm/venv`.
 
-**Running Specific Tests:**
+For local development, `python3 src/fix_settings.py` applies its site-specific
+env settings (with a private backup) and switches the user command symlink to
+the launcher in that repository's `src/` directory. Review its settings before
+running it; this helper is not part of the installed runtime. In this mode,
+keep the checkout in place. Rerunning `./install.sh` restores the normal link
+to `/opt/litellm/src/harinezumigel-llm-stack.py`.
 
-```bash
-# Activate the virtual environment first
-source .venv/bin/activate
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contributions,
+[CHANGELOG.md](CHANGELOG.md) for changes, and
+[GitHub issues](https://github.com/Harinezumigel/harinezumigel-llm-stack/issues)
+for problems or questions.
 
-# Run with verbose output
-pytest -v
+### License and upstream projects
 
-# Run a specific test
-pytest test_harinezumigel_llm_stack.py::TestLLMStack::test_load_config -v
+This repository is [MIT licensed](LICENSE). Referenced model weights have
+their **own upstream licenses, access conditions, and usage restrictions**;
+the repository license does not grant rights to those weights.
 
-# Run tests matching a pattern
-pytest -k "test_resolve" -v
+Built with [PyYAML](https://github.com/yaml/pyyaml),
+[LiteLLM](https://github.com/BerriAI/litellm),
+[vLLM](https://github.com/vllm-project/vllm), and
+[Docker](https://www.docker.com/).
 
-# Or use python -m pytest if pytest command not found
-python -m pytest -v
-```
+## Disclaimer
 
-**Deactivating the Virtual Environment:**
+This software is provided **as is**, without warranty of any kind, as described
+in the [MIT license](LICENSE). You are responsible for reviewing configuration,
+testing your deployment, and deciding whether it is suitable for your use.
 
-```bash
-deactivate
-```
+- **Operational risk:** Starting models consumes GPU memory, system memory,
+  disk space, power, and network bandwidth. Resource checks do not guarantee
+  successful loading, stability, or performance.
+- **Data and availability:** Stopping services interrupts requests. Recreating
+  containers removes container-local data, and log cleanup removes diagnostic
+  history. Back up important data and review commands before running them.
+- **Security and privacy:** You are responsible for authentication, network
+  exposure, access controls, and protecting prompts, responses, credentials,
+  and logs. Do not assume the proxy's API authentication protects its admin UI.
+- **Model behavior:** Outputs may be inaccurate, unsafe, or unsuitable for your
+  application. Guard and judge models do not guarantee safety or correctness;
+  evaluate them independently and use appropriate human oversight.
+- **Third-party terms:** Model licenses, provider terms, and applicable laws
+  remain your responsibility. This project is not affiliated with LLMStack
+  (llmstack.ai / Promptly), and naming upstream projects does not imply their
+  endorsement.
 
-**Quick Test Command (No Activation Required):**
-
-If you prefer not to activate the virtual environment, use the full path:
-
-```bash
-.venv/bin/pytest -q
-```
-
-**Note:** The virtual environment (`.venv/`) is only needed for development and testing. The production installation uses a separate virtual environment at `/opt/litellm/venv` for the LiteLLM proxy.
-
-## Contributing
-
-Contributions welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch
-3. Add tests if applicable (see "Development and Testing" section above)
-4. Update documentation
-5. Submit a pull request
-
-## Dependencies
-
-This project requires the following Python package:
-
-- **[PyYAML](https://pyyaml.org/)** - YAML 1.1 parser and emitter for Python (MIT License)
-
-Install via:
-```bash
-# Ubuntu/Debian
-sudo apt install python3-yaml
-
-# Fedora/RHEL
-sudo dnf install python3-pyyaml
-
-# Or via pip
-pip install pyyaml
-```
-
-## License
-
-[MIT License](LICENSE) - feel free to use in your projects.
-
-## Acknowledgments
-
-Built on these open-source projects:
-
-- **[PyYAML](https://github.com/yaml/pyyaml)** - YAML parser for Python (MIT License)
-- **[LiteLLM](https://github.com/BerriAI/litellm)** - LLM proxy with OpenAI-compatible API
-- **[vLLM](https://github.com/vllm-project/vllm)** - High-throughput inference engine
-- **[Docker](https://www.docker.com/)** - Containerization platform
-
-## Support
-
-For issues and questions:
-
-- 🐛 [Open an issue](https://github.com/Harinezumigel/harinezumigel-llm-stack/issues)
-- 📖 [Read the docs](https://github.com/Harinezumigel/harinezumigel-llm-stack/wiki)
-- 💬 [Discussions](https://github.com/Harinezumigel/harinezumigel-llm-stack/discussions)
-
----
-
-**Note**: This tool is designed for managing local LLM deployments. For production use at scale, consider additional monitoring, health checks, and orchestration tools (Kubernetes, Docker Compose, etc.).
-
-## ⚠️ Disclaimer
-
-**USE AT YOUR OWN RISK**
-
-**Always validate in your own environment before relying on this in any critical system.**
-
-
-This software is provided "as is" without warranty of any kind, express or implied. The authors and contributors are not responsible for:
-
-- **Resource Usage**: GPU memory allocation, disk space consumption, network bandwidth, or compute costs
-- **System Stability**: Docker container failures, process crashes, or system resource exhaustion
-- **Data Loss**: Configuration corruption, container data loss, or log file issues
-- **Security**: Exposed APIs, authentication vulnerabilities, or unauthorized access to deployed models
-- **Model Behavior**: LLM outputs, model hallucinations, biases, or harmful content generation
-- **Production Deployments**: Service downtime, performance degradation, or breaking changes
-
-**Important Notes:**
-- This tool manages Docker containers with GPU access and can consume significant system resources
-- LLM deployments may expose API endpoints on your network - ensure proper firewall and authentication
-- Always test in a non-production environment first
-- Review all configurations before deploying models
-- Monitor resource usage and costs when using cloud infrastructure
-- **Comply with model licenses and usage restrictions**
-
-## Model Licenses
-
-This configuration references third-party models. Model licenses, usage rights, and restrictions are determined by the upstream model publishers. Consult the `upstream` field in `config.yaml` (or the output of `harinezumigel-llm-stack --list`) for the current license and terms applicable to each model.
-
-By using this software, you accept full responsibility for all consequences of its deployment and operation.
+To the extent permitted by applicable law, the authors and contributors are
+not liable for damages arising from use of this software. See the
+[license](LICENSE) for the governing warranty and liability terms.
