@@ -33,6 +33,93 @@ harinezumigel-llm-stack --group rag --stop
 Starting a group does not stop other groups or unselected models. Stop the old
 workload explicitly before switching if both cannot fit in memory.
 
+## Day-to-day commands
+
+Model names and aliases are interchangeable. Use a single model, several model
+names, or `--group rag` to select a workload.
+
+### List models and check status
+
+```bash
+# List configured aliases and groups.
+harinezumigel-llm-stack --list
+
+# Check one model, a group, or all configured backends and LiteLLM.
+harinezumigel-llm-stack guard --ps
+harinezumigel-llm-stack --group rag --ps
+harinezumigel-llm-stack all --ps
+```
+
+### View and follow logs
+
+```bash
+# View recent logs for a model or every member of a group.
+harinezumigel-llm-stack guard --show-log --tail 100
+harinezumigel-llm-stack --group rag --show-log --tail 50
+
+# Continuously follow one backend or the LiteLLM proxy.
+harinezumigel-llm-stack guard --stream-log
+harinezumigel-llm-stack litellm --stream-log
+
+# Start one backend and follow its loading and request logs.
+harinezumigel-llm-stack guard --start --stream-log
+
+# Find Docker log paths and the proxy log directory.
+harinezumigel-llm-stack all --show-log-path
+```
+
+`--stream-log` follows one target indefinitely; group commands do not support
+indefinite log following. Group starts monitor backend readiness and then return.
+For a single backend, `--start --startup-logs` monitors startup until readiness
+without remaining attached indefinitely.
+
+### Stop workloads
+
+```bash
+harinezumigel-llm-stack guard --stop
+harinezumigel-llm-stack --group rag --stop
+harinezumigel-llm-stack all --stop
+```
+
+Stopping leaves containers in place for reuse. A group stops only its selected
+members, including LiteLLM if listed. `all --stop` stops configured backends and
+the managed LiteLLM proxy, not unrelated Docker containers. Stop commands verify
+shutdown and report an error if the selected services remain running.
+
+### Clean logs
+
+```bash
+# Preview before deleting diagnostic history.
+harinezumigel-llm-stack --group rag --clean-log --dry-run
+
+# Clean a model, the proxy, a group, or all configured services.
+harinezumigel-llm-stack guard --clean-log
+harinezumigel-llm-stack litellm --clean-log
+harinezumigel-llm-stack --group rag --clean-log
+harinezumigel-llm-stack all --clean-log
+```
+
+Backend cleanup truncates managed Docker log files. Proxy cleanup removes
+managed `.log` files under `/opt/litellm/logs`. Group cleanup includes proxy logs
+only if LiteLLM belongs to the group. Cleanup does not stop or recreate services,
+delete model weights, or change configuration. Save needed diagnostics first;
+running services may immediately write more logs.
+
+### Recreate after configuration changes
+
+```bash
+harinezumigel-llm-stack --group rag --start --recreate --dry-run
+harinezumigel-llm-stack --group rag --start --recreate
+```
+
+Normal starts reuse containers and their original startup parameters.
+`--start --recreate` replaces selected backend containers using current settings
+and requires `rebuild: true` on every selected backend. Container-local data is
+lost; mounted model files stay on the host. LiteLLM is restarted if selected.
+There is no standalone container-removal option.
+
+Use `harinezumigel-llm-stack --help` for the full command reference.
+
 ## Preflight checks
 
 - Starts and dry-runs check the selected models' memory budgets. NVIDIA GB10
