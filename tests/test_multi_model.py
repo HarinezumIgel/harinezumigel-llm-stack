@@ -556,6 +556,22 @@ class TestMultiModel(unittest.TestCase):
         )
         self.assertNotIn("group/batch startup", self.output.getvalue())
 
+    def test_container_lookup_excludes_longer_model_names(self):
+        names = [
+            "vllm-qwen3.5-8009",
+            "vllm-qwen3.5-8010",
+            "vllm-qwen3.5-122b-a10b-fp8-8011",
+            "vllm-qwen3.5-",
+        ]
+        with patch.object(
+            self.stack, "_docker_list_container_names", return_value=names
+        ):
+            for find in (
+                app.LLMStack._find_all_vllm_containers,
+                app.LLMStack._find_running_vllm_containers,
+            ):
+                self.assertEqual(find(self.stack, "qwen3.5"), names[:2])
+
     def test_stop_waits_for_litellm_process_exit(self):
         with (
             patch.object(

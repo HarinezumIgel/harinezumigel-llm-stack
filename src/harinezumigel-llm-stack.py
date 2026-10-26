@@ -1221,6 +1221,8 @@ class LLMStack:
             n
             for n in self._docker_list_container_names(all_containers=True)
             if n.startswith(prefix)
+            and n[len(prefix) :].isascii()
+            and n[len(prefix) :].isdigit()
         ]
 
     def _find_running_vllm_containers(self, model_name: str) -> list[str]:
@@ -1230,6 +1232,8 @@ class LLMStack:
             n
             for n in self._docker_list_container_names(all_containers=False)
             if n.startswith(prefix)
+            and n[len(prefix) :].isascii()
+            and n[len(prefix) :].isdigit()
         ]
 
     # ------------------------------------------------------------------

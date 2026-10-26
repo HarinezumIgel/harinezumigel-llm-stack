@@ -642,6 +642,8 @@ harinezumigel-llm-stack all --stop
 
 Use `harinezumigel-llm-stack --help` for the full command help. A model's full
 name and its alias are interchangeable in CLI selections.
+Container lookup matches the model's full Docker-safe name followed by a numeric
+port, so similarly prefixed model names are not included in its logs or stops.
 
 | Task | Command |
 |---|---|
