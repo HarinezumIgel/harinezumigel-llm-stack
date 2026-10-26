@@ -806,10 +806,25 @@ This repository is [MIT licensed](LICENSE). Referenced model weights have
 their **own upstream licenses, access conditions, and usage restrictions**;
 the repository license does not grant rights to those weights.
 
-Built with [PyYAML](https://github.com/yaml/pyyaml),
-[LiteLLM](https://github.com/BerriAI/litellm),
-[vLLM](https://github.com/vllm-project/vllm), and
-[Docker](https://www.docker.com/).
+## Credits
+
+This tool builds on the work of these projects and their contributors:
+
+- [vLLM](https://github.com/vllm-project/vllm) for model serving and inference.
+- [LiteLLM](https://github.com/BerriAI/litellm) for the OpenAI-compatible proxy
+  and model routing.
+- [NVIDIA](https://www.nvidia.com/) for GPU computing, the
+  [NGC vLLM images](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/vllm),
+  and [NVIDIA Container Toolkit](https://github.com/NVIDIA/nvidia-container-toolkit)
+  for GPU access from containers.
+- [Docker](https://www.docker.com/) for the backend container runtime.
+- [PyYAML](https://github.com/yaml/pyyaml) for YAML configuration parsing.
+- [Hugging Face](https://huggingface.co/) and the upstream model authors for
+  model distribution, weights, tokenizers, and configurations, subject to each
+  model's license and access conditions.
+
+Thank you to their maintainers and communities. Naming these projects does not
+imply affiliation, sponsorship, or endorsement.
 
 ## Disclaimer
 
