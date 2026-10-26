@@ -808,7 +808,8 @@ the repository license does not grant rights to those weights.
 
 ## Credits
 
-This tool builds on the work of these projects and their contributors:
+This tool would not be possible without the following open-source projects,
+technologies, and the people behind them:
 
 - [vLLM](https://github.com/vllm-project/vllm) for model serving and inference.
 - [LiteLLM](https://github.com/BerriAI/litellm) for the OpenAI-compatible proxy
