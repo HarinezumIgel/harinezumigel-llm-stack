@@ -1506,7 +1506,7 @@ Examples:
   ------------
 
     {prog} mistral_7b --stop
-    {prog} all --stop  # stop configured vLLM containers and LiteLLM
+    {prog} {"all --stop":<42} # stop configured vLLM containers and LiteLLM
 
   LiteLLM proxy:
   --------------

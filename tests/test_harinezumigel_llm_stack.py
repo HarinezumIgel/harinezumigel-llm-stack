@@ -651,9 +651,9 @@ class TestLLMStackInit(unittest.TestCase):
             stack = harinezumigel_llm_stack.LLMStack(config)
             api_base = os.environ["QWEN3_CODER_30B_A3B_INSTRUCT_API_BASE"]
 
-            self.assertEqual(config.vllm_host, "localhost")
-            self.assertEqual(config.vllm_bind_host, "0.0.0.0")
-            self.assertEqual(api_base, "http://localhost:8011/v1")
+            self.assertEqual(config.vllm_host, "127.0.0.1")
+            self.assertEqual(config.vllm_bind_host, "127.0.0.1")
+            self.assertEqual(api_base, "http://127.0.0.1:8011/v1")
             self.assertEqual(
                 stack._parse_api_base(api_base),
                 (config.vllm_host, 8011),
