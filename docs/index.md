@@ -15,6 +15,44 @@ The launcher handles model selection, named model groups, container reuse,
 startup monitoring, and logs. Deployment settings live in configuration files,
 not per-start CLI overrides.
 
+## Use case: experiment with RAG encoders and rerankers
+
+Imagine you have a RAG system and want to compare embedding encoders and
+rerankers. You will define a group for each combination in `config.yaml`.
+
+Both groups also include the LLMs: Mistral (inference), Guard, Judge, and LiteLLM entries.
+They are configured in `model_groups`:
+
+```yaml
+model_groups:
+  rag: [mistral, guard, judge, bge-m3, bge-reranker-v2-m3, litellm]
+  rag_old: [mistral, guard, judge, mmarco-reranker, snowflake-embedder, litellm]
+```
+
+Then run simply with --start which will create not existing containers.
+Start a group to create and start any backend containers that do not exist yet.
+The launcher reuses those containers on later starts; stopping them does not
+delete them.
+
+**`--start` creates a model's container if it does not exist, then starts it.**
+If the container already exists, it is reused: stopped containers are started,
+and running containers are left running.
+
+```bash
+# Create and start the BGE-based RAG group the first time.
+harinezumigel-llm-stack --group rag --start --dry-run
+harinezumigel-llm-stack --group rag --start
+
+# After stopping client traffic, switch to the alternative encoder/reranker.
+harinezumigel-llm-stack --group rag --stop &&
+  harinezumigel-llm-stack --group rag_old --start
+
+# Stop the group, check recent logs, or follow one backend's logs.
+harinezumigel-llm-stack --group rag_old --stop
+harinezumigel-llm-stack --group rag_old --show-log --tail 50
+harinezumigel-llm-stack snowflake-embedder --stream-log
+```
+
 ## How the components fit together
 
 ```text

@@ -10,6 +10,43 @@ launcher handles model selection, container reuse, startup monitoring, and logs.
 This is not limited to NVIDIA DGX Spark: your host architecture, GPU, and driver
 must support the selected NVIDIA NGC vLLM image.
 
+## Use case: experiment with RAG encoders and rerankers
+
+Imagine you have a RAG system and want to compare embedding encoders and
+rerankers. You will define a group for each combination in `config.yaml`.
+
+Both groups also include the LLMs: Mistral (inference), Guard, Judge, and LiteLLM entries.
+They are configured in `model_groups`:
+
+```yaml
+model_groups:
+  rag: [mistral, guard, judge, bge-m3, bge-reranker-v2-m3, litellm]
+  rag_old: [mistral, guard, judge, mmarco-reranker, snowflake-embedder, litellm]
+```
+
+Then run simply with --start which will create not existing containers.
+Start a group to create and start any backend containers that do not exist yet.
+The launcher reuses those containers on later starts; stopping them does not
+delete them.
+
+**`--start` creates a model's container if it does not exist, then starts it.**
+If the container already exists, it is reused: stopped containers are started,
+and running containers are left running.
+
+```bash
+# Create and start the BGE-based RAG group the first time.
+harinezumigel-llm-stack --group rag --start --dry-run
+harinezumigel-llm-stack --group rag --start
+
+# After stopping client traffic, switch to the alternative encoder/reranker.
+harinezumigel-llm-stack --group rag --stop &&
+  harinezumigel-llm-stack --group rag_old --start
+
+# Stop the group, check recent logs, or follow one backend's logs.
+harinezumigel-llm-stack --group rag_old --stop
+harinezumigel-llm-stack --group rag_old --show-log --tail 50
+harinezumigel-llm-stack snowflake-embedder --stream-log
+```
 ## Components at a glance
 
 ```text
@@ -49,78 +86,11 @@ guard/inference/judge pipeline. That orchestration belongs to the client app.
 The backends above illustrate configured choices, not models that must all run
 together. Named groups select which services to manage.
 
-## Documentation website
-
-The GitHub Pages landing page is maintained in [docs/index.md](docs/index.md).
-After pushing these files, open the repository's **Settings > Pages**, select
-**Deploy from a branch**, choose **main** and **/docs**, then click **Save**.
-Once the Pages deployment completes, the website is available at
-<https://harinezumigel.github.io/harinezumigel-llm-stack/>.
-The README remains the full installation and operating guide.
-
 > ❗ **Important** Provided **as is**, without warranty. Read the [disclaimer](#disclaimer)
 > before use and validate before production deployment.
 > This project is not affiliated with LLMStack (llmstack.ai / Promptly).
 > LiteLLM serves an admin UI at `/ui`; do not assume API authentication hides
 > that route. Restrict network access or block it at a reverse proxy.
-
-## Example: Develop local RAG pipeline and use local coding LLM
-
-Suppose your RAG project needs these models:
-
-| Role | CLI alias in the example config | Model |
-|---|---|---|
-| Prompt-check / safety | `guard` | Llama Guard 3 8B |
-| Answer generation / inference | `mistral` | Mistral 7B Instruct v0.3 |
-| Grounding and answer-quality judge | `judge` | Qwen2.5-14B-Instruct |
-| Embeddings | `bge-m3` | BAAI/bge-m3 |
-| Reranking | `bge-reranker-v2-m3` | BAAI/bge-reranker-v2-m3 |
-| Separate coding assistant | `coder` | Qwen3-Coder-Next-AWQ |
-
-Your hardware can run the RAG group **or** the coding model, but not both.
-Use ordered `model_groups` to name these selections, then explicitly stop one
-workload before starting the other. **Starting a group does not stop another
-group or any unselected model.** Groups are selections, not resource schedulers,
-mutually exclusive profiles, or GPU-priority settings.
-
-For a taste of the workflow, give each workload a name:
-
-```yaml
-model_groups:
-  rag: [mistral, guard, judge, bge-m3, bge-reranker-v2-m3, litellm]
-  rag_old: [mistral, guard, judge, mmarco-reranker, snowflake-embedder, litellm]
-  coding: [coder, litellm]
-```
-
-Then create and start the RAG backend containers
-together, and switch to coding when needed:
-
-**`--start` creates a model's container if it does not exist, then starts it.**
-If the container already exists, it is reused: stopped containers are started,
-and running containers are left running.
-
-```bash
-# Preview creation, then create and start missing RAG backend containers.
-# LiteLLM runs as a host process, not a container.
-harinezumigel-llm-stack --group rag --start --dry-run
-harinezumigel-llm-stack --group rag --start
-
-# After stopping client traffic, swap the RAG workload for the coding model.
-# The coding backend container is created on its first start.
-harinezumigel-llm-stack --group rag --stop &&
-  harinezumigel-llm-stack --group coding --start
-```
-
-These commands assume installation, downloaded model files, and configured
-groups. The [installation guide](#install-from-any-checkout-location) gets you
-started; the [config.yaml guide](#configyaml-guide-models-groups-and-runtime-settings)
-explains models, groups, and runtime settings, while the
-[env guide](#env-guide-urls-ports-secrets-and-host-settings) explains URLs, ports,
-secrets, and host settings. The
-[running and switching workloads](#run-and-switch-workloads) covers status,
-switching back, and the shared proxy. The
-[Mistral 7B example](#a-realistic-mistral-entry) illustrates how a group member
-is configured; it is not an instruction to edit or replace that model's entry.
 
 > ❗ **Important**
 > The launcher does not download models. Download the **complete model files**
