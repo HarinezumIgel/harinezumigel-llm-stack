@@ -35,6 +35,8 @@ Client (Copilot, RAG app, ...)
 |   8003 -> [vLLM: Guard]                                 |
 |   8001 -> [vLLM: Mistral]                               |
 |   8013 -> [vLLM: Judge]                                 |
+|   8014 -> [vLLM: BGE M3 embeddings]                     |
+|   8015 -> [vLLM: BGE reranker]                          |
 |   8005 -> [vLLM: Coder]  (alternative workload)         |
 |              |                                          |
 |       NVIDIA GPU / shared memory                        |
@@ -75,8 +77,29 @@ workload explicitly before switching if both cannot fit in memory.
 
 ## Day-to-day commands
 
-Model names and aliases are interchangeable. Use a single model, several model
-names, or `--group rag` to select a workload.
+CLI model names and CLI aliases are interchangeable. Use a single model,
+several model names, or `--group rag` to select a workload.
+
+For example, start an embedding encoder or cross-encoder using the supplied
+CLI aliases:
+
+```bash
+# Embedding encoder (BGE M3).
+harinezumigel-llm-stack bge-m3-embedder --start
+
+# Cross-encoder (BGE reranker).
+harinezumigel-llm-stack bge-reranker --start
+
+# Embedding encoder (Snowflake).
+harinezumigel-llm-stack snowflake-embedder --start
+
+# Cross-encoder (mMARCO).
+harinezumigel-llm-stack mmarco-reranker --start
+```
+
+These commands start individual backends; they do not require a model group
+or start LiteLLM. Use `snowflake-embedder` for Snowflake embeddings and
+`mmarco-reranker` for mMARCO cross-encoding.
 
 ### List models and check status
 
@@ -148,7 +171,7 @@ only if LiteLLM belongs to the group. Cleanup does not stop or recreate services
 delete model weights, or change configuration. Save needed diagnostics first;
 running services may immediately write more logs.
 
-### Recreate after configuration changes
+### Recreate after backend startup changes
 
 ```bash
 harinezumigel-llm-stack --group rag --start --recreate --dry-run
@@ -160,6 +183,8 @@ Normal starts reuse containers and their original startup parameters.
 and requires `rebuild: true` on every selected backend. Container-local data is
 lost; mounted model files stay on the host. LiteLLM is restarted if selected.
 There is no standalone container-removal option.
+Proxy-only routing and API-alias changes require only a LiteLLM restart, as
+shown above, not backend recreation.
 
 Use `harinezumigel-llm-stack --help` for the full command reference.
 

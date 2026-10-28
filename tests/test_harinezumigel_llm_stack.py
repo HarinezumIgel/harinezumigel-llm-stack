@@ -2825,6 +2825,10 @@ class TestCLIProgramName(unittest.TestCase):
                 columns = {line.index("#") for line in commands if "#" in line}
                 self.assertEqual(columns, {4 + len(invoked) + 1 + 42 + 1})
                 self.assertIn("  Batch startup:\n  --------------\n\n", examples)
+                self.assertIn(f"{invoked} snowflake-embedder --start", examples)
+                self.assertIn(f"{invoked} mmarco-reranker --start", examples)
+                self.assertIn("# embedding encoder alias (Snowflake)", examples)
+                self.assertIn("# cross-encoder alias (mMARCO)", examples)
                 self.assertIn(
                     f"{invoked} --group rag --start --startup-timeout 600", examples
                 )

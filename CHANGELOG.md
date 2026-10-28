@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10/28/2026 Revision 90]
+
+### Added
+- Configuration for BAAI BGE M3 embeddings and BGE reranker v2 M3 in `rag`,
+  retaining Mistral, Guard, Judge, and LiteLLM.
+- A `rag_old` group with Mistral, Guard, Judge, LiteLLM, Snowflake Arctic Embed L
+  v2.0 (`snowflake-embedder`), and the multilingual mMARCO MiniLM cross-encoder
+  (`mmarco-reranker`).
+- Backend ports 8014-8017 and matching API-base environment variables for the
+  four embedding/reranking models.
+- LiteLLM API aliases `bge-m3-embedder`, `bge-reranker`, `snowflake-embedder`, and
+  `mmark-xencoder` via `router_settings.model_group_alias`. Original API model
+  names, backend served names, and CLI group members remain supported unchanged.
+- CLI start examples for an embedding encoder (`snowflake-embedder`) and
+  cross-encoder (`mmarco-reranker`) in `--help`, the README, and documentation
+  landing page.
+- Regression coverage for RAG group membership, provider/backend name agreement,
+  ports, local directories, runtime settings, and combined memory budgets.
+
+### Changed
+- Renamed the legacy CLI aliases to `snowflake-embedder` and `mmarco-reranker`,
+  including group references and help examples; API and backend names are unchanged.
+- Kept encoder documentation focused on individual backend lifecycle commands
+  rather than RAG-specific integration and HTTP request examples.
+- Documented that API-alias changes require only a LiteLLM restart, not backend
+  recreation. The RAG additions use configuration only; launcher/runtime code
+  is unchanged.
+
+### Fixed
+- Exposed `snowflake-embedder` and `mmarco-reranker` as LiteLLM API aliases as
+  well as CLI aliases, retaining `mmark-xencoder`.
+- Added missing CLI aliases `bge-m3-embedder` and `bge-reranker` so the BGE
+  models appear in `--list` and can be started using the same names as their API aliases.
+- Pylance diagnostics in multi-model tests by typing fixtures, mock callbacks,
+  configuration data, and subprocess handles, with explicit optional-value checks.
+
 ## [10/26/2026 Revision 81]
 
 ### Changed

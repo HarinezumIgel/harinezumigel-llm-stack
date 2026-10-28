@@ -2,6 +2,7 @@
 """Multi-model selection, startup orchestration, and follower lifecycle tests."""
 
 import io
+import argparse
 import json
 import os
 import subprocess
@@ -14,6 +15,7 @@ from dataclasses import replace
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
+from typing import Any, cast
 
 import yaml
 
@@ -28,7 +30,7 @@ class TestMultiModel(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
         self.config_path = self.root / "config.yaml"
-        self.data = {
+        self.data: dict[str, Any] = {
             "model_groups": {"rag": ["first", "second", "model_a"]},
             "model_list": [
                 {
@@ -94,11 +96,11 @@ class TestMultiModel(unittest.TestCase):
     def write_config(self):
         self.config_path.write_text(yaml.safe_dump(self.data), encoding="utf-8")
 
-    def args(self, *args):
+    def args(self, *args: str) -> argparse.Namespace:
         with patch.object(sys, "argv", ["llm", *args]):
             return app.parse_args()
 
-    def run_command(self, *args):
+    def run_command(self, *args: str) -> None:
         with redirect_stdout(self.output):
             self.stack.run(self.args(*args))
 
@@ -147,12 +149,20 @@ class TestMultiModel(unittest.TestCase):
     def test_group_can_start_litellm_in_order(self):
         self.data["model_groups"]["stack"] = ["litellm", "first", "second"]
         self.write_config()
-        events = []
-        self.start_litellm.side_effect = lambda **_: events.append(("start", "litellm"))
-        self.start.side_effect = lambda model, _: events.append(("start", model.name))
-        self.monitor.side_effect = lambda backend, **_: events.append(
-            ("ready", backend.container)
-        )
+        events: list[tuple[str, str]] = []
+
+        def _start_litellm(**_: Any) -> None:
+            events.append(("start", "litellm"))
+
+        def _start(model: Any, _: Any) -> None:
+            events.append(("start", model.name))
+
+        def _ready(backend: hls_startup.BackendHandle, **_: Any) -> None:
+            events.append(("ready", backend.container))
+
+        self.start_litellm.side_effect = _start_litellm
+        self.start.side_effect = _start
+        self.monitor.side_effect = _ready
 
         self.run_command("--group", "stack", "--start")
 
@@ -170,9 +180,16 @@ class TestMultiModel(unittest.TestCase):
     def test_recreate_applies_to_vllm_and_restarts_litellm(self):
         self.data["model_groups"]["stack"] = ["litellm", "first"]
         self.write_config()
-        events = []
-        self.stop_litellm.side_effect = lambda **_: events.append("stop")
-        self.start_litellm.side_effect = lambda **_: events.append("start")
+        events: list[str] = []
+
+        def _stop(**_: Any) -> None:
+            events.append("stop")
+
+        def _start(**_: Any) -> None:
+            events.append("start")
+
+        self.stop_litellm.side_effect = _stop
+        self.start_litellm.side_effect = _start
         with patch.object(self.stack, "_find_litellm_pids", side_effect=[["123"], []]):
             self.run_command("--group", "stack", "--start", "--recreate")
 
@@ -252,21 +269,33 @@ class TestMultiModel(unittest.TestCase):
         self.start_litellm.assert_not_called()
 
     def test_starts_wait_sequentially(self):
-        events = []
-        self.start.side_effect = lambda model, _: events.append(("start", model.name))
-        self.monitor.side_effect = lambda backend, **_: events.append(
-            ("wait", backend.container)
-        )
+        events: list[tuple[str, str]] = []
+
+        def _start(model: Any, _: Any) -> None:
+            events.append(("start", model.name))
+
+        def _wait(backend: hls_startup.BackendHandle, **_: Any) -> None:
+            events.append(("wait", backend.container))
+
+        self.start.side_effect = _start
+        self.monitor.side_effect = _wait
         self.run_command("first", "second", "--start")
         self.assertEqual(
             [kind for kind, _ in events], ["start", "wait", "start", "wait"]
         )
 
     def test_all_stop_includes_litellm_before_backends(self):
-        events = []
-        self.stop_litellm.side_effect = lambda **_: events.append("litellm")
+        events: list[str] = []
+
+        def _stop_litellm(**_: Any) -> None:
+            events.append("litellm")
+
+        def _stop_backends(**_: Any) -> None:
+            events.append("vllm")
+
+        self.stop_litellm.side_effect = _stop_litellm
         with patch.object(self.stack, "stop_all_vllm") as stop_backends:
-            stop_backends.side_effect = lambda **_: events.append("vllm")
+            stop_backends.side_effect = _stop_backends
             self.run_command("all", "--stop")
         self.assertEqual(events, ["litellm", "vllm"])
         self.stop_litellm.assert_called_once_with(dry_run=False)
@@ -355,10 +384,19 @@ class TestMultiModel(unittest.TestCase):
     def test_group_recreate_stops_all_selected_containers_before_memory_and_launch(
         self,
     ):
-        events = []
+        events: list[tuple[str, Any]] = []
 
-        def _containers(name):
+        def _containers(name: str) -> list[str]:
             return [f"vllm-{name}-8101", f"vllm-{name}-8999"]
+
+        def _stop(name: str, **_: Any) -> None:
+            events.append(("stop", name))
+
+        def _memory(*args: Any, **_: Any) -> None:
+            events.append(("memory", args))
+
+        def _start(model: Any, _: Any) -> None:
+            events.append(("start", model.name))
 
         with (
             patch.object(
@@ -367,13 +405,11 @@ class TestMultiModel(unittest.TestCase):
             patch.object(
                 self.stack,
                 "_docker_stop_container",
-                side_effect=lambda name, **kw: events.append(("stop", name)),
+                side_effect=_stop,
             ),
         ):
-            self.vram_check.side_effect = lambda *a, **kw: events.append(("memory", a))
-            self.start.side_effect = lambda model, _: events.append(
-                ("start", model.name)
-            )
+            self.vram_check.side_effect = _memory
+            self.start.side_effect = _start
             self.run_command("--group", "rag", "--start", "--recreate")
         self.assertEqual(
             [event[0] for event in events],
@@ -739,7 +775,8 @@ class TestMultiModel(unittest.TestCase):
         self.assertNotIn("add --stream-log", text)
 
     def test_start_log_hints_are_suppressed_for_dry_runs(self):
-        for selection in [("first",), ("--group", "rag")]:
+        selections: list[tuple[str, ...]] = [("first",), ("--group", "rag")]
+        for selection in selections:
             with self.subTest(selection=selection):
                 self.output.seek(0)
                 self.output.truncate()
@@ -864,7 +901,14 @@ class TestMultiModel(unittest.TestCase):
                         reuse_existing=True,
                         recreate=False,
                     )
-                    events = []
+                    events: list[str] = []
+
+                    def _memory(*_: Any, **__: Any) -> None:
+                        events.append("memory")
+
+                    def _driver(**_: Any) -> None:
+                        events.append("driver")
+
                     with (
                         patch.object(
                             self.stack, "_docker_container_state", return_value=state
@@ -872,12 +916,12 @@ class TestMultiModel(unittest.TestCase):
                         patch.object(
                             self.stack.preflight_checks,
                             "check_gpu_memory",
-                            side_effect=lambda *a, **kw: events.append("memory"),
+                            side_effect=_memory,
                         ),
                         patch.object(
                             self.stack.preflight_checks,
                             "check_nvidia_driver",
-                            side_effect=lambda **kw: events.append("driver"),
+                            side_effect=_driver,
                         ),
                         patch.object(
                             self.stack, "_docker_start_container"
@@ -960,13 +1004,14 @@ class TestMultiModel(unittest.TestCase):
         )
         self.assertNotIn("--override-generation-config", command)
         self.assertEqual(command[command.index("--generation-config") + 1], "vllm")
-        for invalid in (
+        invalid_values: list[Any] = [
             "not a mapping",
             [],
             {"temperature": float("nan")},
             {"temperature": float("inf")},
             {"temperature": {1, 2}},
-        ):
+        ]
+        for invalid in invalid_values:
             with self.subTest(invalid=invalid):
                 model.model_info["override_generation_config"] = invalid
                 with redirect_stdout(self.output), self.assertRaises(SystemExit):
@@ -987,13 +1032,14 @@ class TestMultiModel(unittest.TestCase):
         )
 
     def test_invalid_generation_settings_rejected_while_loading(self):
-        for settings in (
+        invalid_settings: list[dict[str, Any]] = [
             {"generation_config": None},
             {"generation_config": ""},
             {"generation_config": 123},
             {"override_generation_config": []},
             {"override_generation_config": {"temperature": float("nan")}},
-        ):
+        ]
+        for settings in invalid_settings:
             with self.subTest(settings=settings):
                 self.data["model_list"][0]["model_info"].update(settings)
                 self.write_config()
@@ -1106,10 +1152,17 @@ class TestMultiModel(unittest.TestCase):
 
     def test_example_and_readme_use_consistent_backend_defaults(self):
         root = Path(__file__).resolve().parents[1]
-        example = yaml.safe_load(
-            (root / "config/config.yaml.example").read_text(encoding="utf-8")
+        example = cast(
+            dict[str, Any],
+            yaml.safe_load(
+                (root / "config/config.yaml.example").read_text(encoding="utf-8")
+            ),
         )
-        expected = {
+        expected: dict[str, dict[str, float | int]] = {
+            "bge-m3": {},
+            "bge-reranker-v2-m3": {},
+            "Snowflake/snowflake-arctic-embed-l-v2.0": {},
+            "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1": {},
             "llama_guard3_8b": {"temperature": 0.0, "top_p": 1.0},
             "llama_3_1_8b": {"temperature": 0.7, "top_p": 0.9},
             "mistral_7b": {"temperature": 0.7, "top_p": 0.9},
@@ -1144,6 +1197,13 @@ class TestMultiModel(unittest.TestCase):
         for entry in example["model_list"]:
             with self.subTest(model=entry["model_name"]):
                 info = entry["model_info"]
+                if info.get("mode") in ("embedding", "rerank"):
+                    self.assertEqual(expected[entry["model_name"]], {})
+                    self.assertNotIn("override_generation_config", info)
+                    self.assertFalse(
+                        sampling_keys.intersection(entry["litellm_params"])
+                    )
+                    continue
                 self.assertEqual(info["generation_config"], "vllm")
                 self.assertEqual(
                     info["override_generation_config"], expected[entry["model_name"]]
@@ -1162,7 +1222,7 @@ class TestMultiModel(unittest.TestCase):
 
         readme = (root / "README.md").read_text(encoding="utf-8")
         for block in readme.split("```yaml\n")[1:]:
-            sample = yaml.safe_load(block.split("```", 1)[0])
+            sample = cast(dict[str, Any], yaml.safe_load(block.split("```", 1)[0]))
             if "model_list" in sample:
                 mistral = sample["model_list"][0]
                 self.assertEqual(mistral["model_name"], "mistral_7b")
@@ -1176,8 +1236,79 @@ class TestMultiModel(unittest.TestCase):
         else:
             self.fail("README Mistral YAML sample not found")
 
+    def test_example_rag_groups_route_pooling_models(self):
+        root = Path(__file__).resolve().parents[1]
+        profiles = {
+            "bge-m3": ("embedding", "bge-m3", 8014, 8192),
+            "bge-reranker-v2-m3": ("rerank", "bge-reranker-v2-m3", 8015, 8192),
+            "Snowflake/snowflake-arctic-embed-l-v2.0": (
+                "embedding",
+                "snowflake-arctic-embed-l-v2.0",
+                8016,
+                8192,
+            ),
+            "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1": (
+                "rerank",
+                "mmarco-mMiniLMv2-L12-H384-v1",
+                8017,
+                512,
+            ),
+        }
+        with patch.dict(os.environ, clear=True):
+            app.load_env_file(str(root / "config/env.example"))
+            stack = app.LLMStack(
+                replace(
+                    app.APP, litellm_config=str(root / "config/config.yaml.example")
+                )
+            )
+            stack.load_models()
+            common = ["mistral_7b", "llama_guard3_8b", "qwen2_5_14b_instruct"]
+            for group, pair in (
+                ("rag", ["bge-m3", "bge-reranker-v2-m3"]),
+                (
+                    "rag_old",
+                    [
+                        "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
+                        "Snowflake/snowflake-arctic-embed-l-v2.0",
+                    ],
+                ),
+            ):
+                with self.subTest(group=group):
+                    selected = stack._select_models(self.args("--group", group))
+                    self.assertEqual(selected, common + pair + ["litellm"])
+                    self.assertAlmostEqual(
+                        sum(
+                            stack.models[name].gpu_memory_utilization
+                            for name in selected[:-1]
+                        ),
+                        0.87,
+                    )
+
+            for name, (mode, directory, port, context) in profiles.items():
+                with self.subTest(model=name):
+                    model = stack.models[name]
+                    self.assertEqual(model.model_info["mode"], mode)
+                    self.assertEqual(model.model_info["model_dir"], directory)
+                    self.assertEqual(model.api_base, f"http://127.0.0.1:{port}/v1")
+                    self.assertEqual(model.backend_model, f"hosted_vllm/{name}")
+                    self.assertEqual(model.context_length, context)
+                    runtime = stack._resolve_runtime_settings(model)
+                    command = stack._build_vllm_command(
+                        model, Path("/opt/models") / directory, port, runtime
+                    )
+                    self.assertEqual(
+                        command[command.index("--served-model-name") + 1], name
+                    )
+                    self.assertEqual(
+                        command[command.index("--model") + 1], f"/models/{directory}"
+                    )
+                    self.assertEqual(
+                        command[command.index("-p") + 1], f"127.0.0.1:{port}:8000"
+                    )
+                    self.assertTrue(model.allow_rebuild)
+
     def test_invalid_groups_rejected(self):
-        for groups in (
+        invalid_groups: list[Any] = [
             None,
             [],
             {"bad": []},
@@ -1185,7 +1316,8 @@ class TestMultiModel(unittest.TestCase):
             {"bad": ["all"]},
             {"bad": [123]},
             {"bad": "first"},
-        ):
+        ]
+        for groups in invalid_groups:
             with self.subTest(groups=groups):
                 self.data["model_groups"] = groups
                 self.write_config()
@@ -1239,16 +1371,20 @@ class TestStartupMonitor(unittest.TestCase):
     def test_log_follower_filters_since_current_container_start(self):
         timestamp = "2026-10-26T15:06:24.359526098Z"
         popen = subprocess.Popen
-        command = []
+        command: list[str] = []
 
-        def spawn(*args, **kwargs):
-            command.extend(args[0])
+        def _spawn(
+            args: list[str], *, stdout: int, stderr: int
+        ) -> subprocess.Popen[bytes]:
+            command.extend(args)
             return popen(
-                [sys.executable, "-c", "import time; time.sleep(30)"], **kwargs
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                stdout=stdout,
+                stderr=stderr,
             )
 
         self.health.side_effect = [False, True]
-        with patch.object(hls_startup.subprocess, "Popen", side_effect=spawn):
+        with patch.object(hls_startup.subprocess, "Popen", side_effect=_spawn):
             self.monitor.wait(
                 self.backend,
                 timeout=3,
@@ -1274,7 +1410,7 @@ class TestStartupMonitor(unittest.TestCase):
     def test_replayed_history_is_filtered_from_displayed_output(self):
         popen = subprocess.Popen
 
-        def _spawn(*args, **kwargs):
+        def _spawn(*_: object, stdout: int, stderr: int) -> subprocess.Popen[bytes]:
             return popen(
                 [
                     sys.executable,
@@ -1287,7 +1423,8 @@ class TestStartupMonitor(unittest.TestCase):
                     "file=sys.stderr); sys.stdin.read()",
                 ],
                 stdin=subprocess.PIPE,
-                **kwargs,
+                stdout=stdout,
+                stderr=stderr,
             )
 
         self.health.side_effect = [False, False, True]
@@ -1324,26 +1461,30 @@ class TestStartupMonitor(unittest.TestCase):
 
     def test_silent_follower_cannot_block_health_and_is_reaped(self):
         popen = subprocess.Popen
-        child = None
+        child: subprocess.Popen[bytes] | None = None
 
-        def spawn(*_, **kwargs):
+        def _spawn(*_: object, stdout: int, stderr: int) -> subprocess.Popen[bytes]:
             nonlocal child
             child = popen(
-                [sys.executable, "-c", "import time; time.sleep(30)"], **kwargs
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                stdout=stdout,
+                stderr=stderr,
             )
             return child
 
         self.health.side_effect = [False, True]
-        with patch.object(hls_startup.subprocess, "Popen", side_effect=spawn):
+        with patch.object(hls_startup.subprocess, "Popen", side_effect=_spawn):
             self.monitor.wait(self.backend, timeout=3, show_logs=True)
+        assert child is not None
+        assert child.stdout is not None
         self.assertIsNotNone(child.poll())
         self.assertTrue(child.stdout.closed)
 
     def test_partial_utf8_line_is_flushed_and_follower_reaped(self):
         popen = subprocess.Popen
-        child = None
+        child: subprocess.Popen[bytes] | None = None
 
-        def spawn(*_, **kwargs):
+        def _spawn(*_: object, stdout: int, stderr: int) -> subprocess.Popen[bytes]:
             nonlocal child
             child = popen(
                 [
@@ -1354,66 +1495,77 @@ class TestStartupMonitor(unittest.TestCase):
                     "time.sleep(0.05); os.write(1,b'\\x82\\xac'); "
                     "time.sleep(30)",
                 ],
-                **kwargs,
+                stdout=stdout,
+                stderr=stderr,
             )
             return child
 
         self.health.side_effect = [False, False, True]
-        with patch.object(hls_startup.subprocess, "Popen", side_effect=spawn):
+        with patch.object(hls_startup.subprocess, "Popen", side_effect=_spawn):
             with redirect_stdout(self.output):
                 self.monitor.wait(self.backend, timeout=3, show_logs=True)
         self.assertIn("loading \u20ac", self.output.getvalue())
+        assert child is not None
         self.assertIsNotNone(child.poll())
 
     def test_interrupt_reaps_follower(self):
         popen = subprocess.Popen
-        child = None
+        child: subprocess.Popen[bytes] | None = None
 
-        def spawn(*_, **kwargs):
+        def _spawn(*_: object, stdout: int, stderr: int) -> subprocess.Popen[bytes]:
             nonlocal child
             child = popen(
-                [sys.executable, "-c", "import time; time.sleep(30)"], **kwargs
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                stdout=stdout,
+                stderr=stderr,
             )
             return child
 
         self.health.side_effect = [False, KeyboardInterrupt]
-        with patch.object(hls_startup.subprocess, "Popen", side_effect=spawn):
+        with patch.object(hls_startup.subprocess, "Popen", side_effect=_spawn):
             with self.assertRaises(KeyboardInterrupt):
                 self.monitor.wait(self.backend, timeout=3, show_logs=True)
+        assert child is not None
+        assert child.stdout is not None
         self.assertIsNotNone(child.poll())
         self.assertTrue(child.stdout.closed)
 
     def test_timeout_reaps_follower(self):
         popen = subprocess.Popen
-        child = None
+        child: subprocess.Popen[bytes] | None = None
 
-        def spawn(*_, **kwargs):
+        def _spawn(*_: object, stdout: int, stderr: int) -> subprocess.Popen[bytes]:
             nonlocal child
             child = popen(
-                [sys.executable, "-c", "import time; time.sleep(30)"], **kwargs
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                stdout=stdout,
+                stderr=stderr,
             )
             return child
 
-        with patch.object(hls_startup.subprocess, "Popen", side_effect=spawn):
+        with patch.object(hls_startup.subprocess, "Popen", side_effect=_spawn):
             with self.assertRaisesRegex(hls_startup.StartupError, "Readiness timeout"):
                 self.monitor.wait(self.backend, timeout=0.05, show_logs=True)
+        assert child is not None
+        assert child.stdout is not None
         self.assertIsNotNone(child.poll())
         self.assertTrue(child.stdout.closed)
 
     def test_follower_failure_is_reported(self):
         popen = subprocess.Popen
 
-        def spawn(*_, **kwargs):
+        def _spawn(*_: object, stdout: int, stderr: int) -> subprocess.Popen[bytes]:
             return popen(
                 [
                     sys.executable,
                     "-c",
                     "print('cannot read logs'); raise SystemExit(7)",
                 ],
-                **kwargs,
+                stdout=stdout,
+                stderr=stderr,
             )
 
-        with patch.object(hls_startup.subprocess, "Popen", side_effect=spawn):
+        with patch.object(hls_startup.subprocess, "Popen", side_effect=_spawn):
             with redirect_stdout(self.output):
                 with self.assertRaisesRegex(hls_startup.StartupError, "exit code 7"):
                     self.monitor.wait(self.backend, timeout=3, show_logs=True)
@@ -1437,7 +1589,7 @@ class TestHealthProbe(unittest.TestCase):
                 self.send_response(200 if self.path == "/health" else 503)
                 self.end_headers()
 
-            def log_message(self, *_):
+            def log_message(self, format: str, *args: Any) -> None:
                 pass
 
         with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:

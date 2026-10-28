@@ -23,6 +23,15 @@ model_groups:
     - mistral
     - guard
     - judge
+    - bge-m3
+    - bge-reranker-v2-m3
+    - litellm
+  rag_old:
+    - mistral
+    - guard
+    - judge
+    - mmarco-reranker
+    - snowflake-embedder
     - litellm
   quick:
     - mistral
@@ -36,6 +45,117 @@ model_list:
   # - If `rebuild` is missing or not true, recreate is blocked for that model.
   # - Sampling defaults belong in model_info.override_generation_config.
   # - Explicit request sampling parameters override these backend defaults.
+  # - Pooling models are auto-detected by the configured vLLM image.
+  # - max_output_tokens: 1 is launcher metadata only for pooling models.
+  # - Each RAG group budgets 0.71 for chat models + 0.08 + 0.08 = 0.87.
+  # ---------------------------------------------------------------------------
+  # RAG embeddings and reranking
+  # Provider model names match --served-model-name, not local directory names.
+  # ---------------------------------------------------------------------------
+  - model_name: bge-m3
+    litellm_params:
+      model: hosted_vllm/bge-m3
+      api_base: os.environ/BGE_M3_API_BASE
+      api_key: os.environ/LOCAL_VLLM_API_KEY
+      request_timeout: 240
+    rebuild: true
+    model_info:
+      mode: embedding
+      alias: bge-m3-embedder
+      model_dir: bge-m3
+      context_length: 8192
+      max_input_tokens: 8191
+      max_output_tokens: 1
+      gpu_memory_utilization: 0.08
+      enforce_eager: true
+      ipc: host
+      dtype: auto
+      max_num_seqs: 4
+      max_num_batched_tokens: 8192
+      input_cost_per_token: 0
+      output_cost_per_token: 0
+      description: "BGE M3 multilingual dense embeddings for RAG."
+      upstream: "https://huggingface.co/BAAI/bge-m3"
+      license: "See upstream model license"
+
+  - model_name: bge-reranker-v2-m3
+    litellm_params:
+      model: hosted_vllm/bge-reranker-v2-m3
+      api_base: os.environ/BGE_RERANKER_V2_M3_API_BASE
+      api_key: os.environ/LOCAL_VLLM_API_KEY
+      request_timeout: 240
+    rebuild: true
+    model_info:
+      mode: rerank
+      alias: bge-reranker
+      model_dir: bge-reranker-v2-m3
+      context_length: 8192
+      max_input_tokens: 8191
+      max_output_tokens: 1
+      gpu_memory_utilization: 0.08
+      enforce_eager: true
+      ipc: host
+      dtype: auto
+      max_num_seqs: 4
+      max_num_batched_tokens: 8192
+      input_cost_per_token: 0
+      output_cost_per_token: 0
+      description: "BGE reranker v2 M3 multilingual cross-encoder for RAG."
+      upstream: "https://huggingface.co/BAAI/bge-reranker-v2-m3"
+      license: "See upstream model license"
+
+  - model_name: Snowflake/snowflake-arctic-embed-l-v2.0
+    litellm_params:
+      model: hosted_vllm/Snowflake/snowflake-arctic-embed-l-v2.0
+      api_base: os.environ/SNOWFLAKE_ARCTIC_EMBED_API_BASE
+      api_key: os.environ/LOCAL_VLLM_API_KEY
+      request_timeout: 240
+    rebuild: true
+    model_info:
+      mode: embedding
+      alias: snowflake-embedder
+      model_dir: snowflake-arctic-embed-l-v2.0
+      context_length: 8192
+      max_input_tokens: 8191
+      max_output_tokens: 1
+      gpu_memory_utilization: 0.08
+      enforce_eager: true
+      ipc: host
+      dtype: auto
+      max_num_seqs: 4
+      max_num_batched_tokens: 8192
+      input_cost_per_token: 0
+      output_cost_per_token: 0
+      description: "Legacy Snowflake Arctic multilingual embeddings for RAG."
+      upstream: "https://huggingface.co/Snowflake/snowflake-arctic-embed-l-v2.0"
+      license: "See upstream model license"
+
+  - model_name: cross-encoder/mmarco-mMiniLMv2-L12-H384-v1
+    litellm_params:
+      model: hosted_vllm/cross-encoder/mmarco-mMiniLMv2-L12-H384-v1
+      api_base: os.environ/MMARCO_MINILM_API_BASE
+      api_key: os.environ/LOCAL_VLLM_API_KEY
+      request_timeout: 240
+    rebuild: true
+    model_info:
+      mode: rerank
+      alias: mmarco-reranker
+      model_dir: mmarco-mMiniLMv2-L12-H384-v1
+      context_length: 512
+      max_input_tokens: 511
+      max_output_tokens: 1
+      gpu_memory_utilization: 0.08
+      enforce_eager: true
+      ipc: host
+      dtype: auto
+      max_num_seqs: 4
+      max_num_batched_tokens: 2048
+      input_cost_per_token: 0
+      output_cost_per_token: 0
+      description: "Legacy mMARCO multilingual MiniLM cross-encoder for RAG."
+      upstream: "https://huggingface.co/cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
+      license: "See upstream model license"
+
   # ---------------------------------------------------------------------------
   # Safety / moderation
   # ---------------------------------------------------------------------------
@@ -600,6 +720,12 @@ model_list:
 
 router_settings:
   routing_strategy: simple-shuffle
+  model_group_alias:
+    mmarco-reranker: cross-encoder/mmarco-mMiniLMv2-L12-H384-v1
+    bge-m3-embedder: bge-m3
+    bge-reranker: bge-reranker-v2-m3
+    snowflake-embedder: Snowflake/snowflake-arctic-embed-l-v2.0
+    mmark-xencoder: cross-encoder/mmarco-mMiniLMv2-L12-H384-v1
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY

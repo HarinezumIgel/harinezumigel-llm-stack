@@ -30,6 +30,8 @@ Client (Copilot, RAG app, ...)
 |   8003 -> [vLLM: Guard]                                 |
 |   8001 -> [vLLM: Mistral]                               |
 |   8013 -> [vLLM: Judge]                                 |
+|   8014 -> [vLLM: BGE M3 embeddings]                     |
+|   8015 -> [vLLM: BGE reranker]                          |
 |   8005 -> [vLLM: Coder]  (alternative workload)         |
 |              |                                          |
 |       NVIDIA GPU / shared memory                        |
@@ -64,16 +66,18 @@ The README remains the full installation and operating guide.
 
 ## Example: Develop local RAG pipeline and use local coding LLM
 
-Suppose your RAG project needs three models:
+Suppose your RAG project needs these models:
 
 | Role | CLI alias in the example config | Model |
 |---|---|---|
 | Prompt-check / safety | `guard` | Llama Guard 3 8B |
 | Answer generation / inference | `mistral` | Mistral 7B Instruct v0.3 |
 | Grounding and answer-quality judge | `judge` | Qwen2.5-14B-Instruct |
+| Embeddings | `bge-m3` | BAAI/bge-m3 |
+| Reranking | `bge-reranker-v2-m3` | BAAI/bge-reranker-v2-m3 |
 | Separate coding assistant | `coder` | Qwen3-Coder-Next-AWQ |
 
-Your hardware can run the RAG trio **or** the coding model, but not both.
+Your hardware can run the RAG group **or** the coding model, but not both.
 Use ordered `model_groups` to name these selections, then explicitly stop one
 workload before starting the other. **Starting a group does not stop another
 group or any unselected model.** Groups are selections, not resource schedulers,
@@ -83,7 +87,8 @@ For a taste of the workflow, give each workload a name:
 
 ```yaml
 model_groups:
-  rag: [mistral, guard, judge, litellm]
+  rag: [mistral, guard, judge, bge-m3, bge-reranker-v2-m3, litellm]
+  rag_old: [mistral, guard, judge, mmarco-reranker, snowflake-embedder, litellm]
   coding: [coder, litellm]
 ```
 
@@ -306,6 +311,8 @@ harinezumigel-llm-stack litellm --stop &&
 
 Each backend needs a distinct port and a matching `*_API_BASE`. The example uses
 8003 for Guard, 8013 for the 14B judge, and 8005 for `coder`; LiteLLM uses 4000.
+The RAG embedding/reranking backends use 8014/8015 for BGE and 8016/8017 for
+Snowflake/mMARCO. These private backend ports do not need inbound LAN access.
 The launcher expands env references. Whitespace-separated inline comments are
 supported; quote values containing a literal whitespace-separated `#`.
 
@@ -317,7 +324,11 @@ under `MODEL_ROOT`, for example:
 ├── mistral-7b-instruct-v0.3/
 ├── llama-guard3-8b/
 ├── Qwen2.5-14B-Instruct/
-└── Qwen3-Coder-Next-AWQ/
+├── Qwen3-Coder-Next-AWQ/
+├── bge-m3/
+├── bge-reranker-v2-m3/
+├── snowflake-arctic-embed-l-v2.0/
+└── mmarco-mMiniLMv2-L12-H384-v1/
 ```
 
 Download each model's weights, tokenizer, and configuration files from its
@@ -419,8 +430,8 @@ be unique. It does not rename an API model. With this entry, vLLM serves
 #### Define reusable groups
 
 Replace the top-level `model_groups` mapping in your installed YAML with this
-mapping, alongside `model_list`. The supplied example already has `rag` and
-`quick`; **add `coding` before using the switching commands**:
+mapping, alongside `model_list`. The supplied example already has `rag`,
+`rag_old`, and `quick`; **add `coding` before using the switching commands**:
 
 ```yaml
 model_groups:
@@ -428,6 +439,15 @@ model_groups:
     - mistral
     - guard
     - judge
+    - bge-m3
+    - bge-reranker-v2-m3
+    - litellm
+  rag_old:
+    - mistral
+    - guard
+    - judge
+    - mmarco-reranker
+    - snowflake-embedder
     - litellm
   quick:
     - mistral
@@ -642,11 +662,20 @@ harinezumigel-llm-stack all --stop
 
 Use `harinezumigel-llm-stack --help` for the full command help. A model's full
 name and its alias are interchangeable in CLI selections.
+The supplied encoder aliases are `bge-m3-embedder` and `snowflake-embedder`;
+cross-encoder aliases are `bge-reranker` and `mmarco-reranker`. Each start
+command below selects one backend, without requiring a group or starting LiteLLM.
+All four names also work as LiteLLM API aliases after restarting the proxy to
+reload its configuration. The older API alias `mmark-xencoder` remains supported.
 Container lookup matches the model's full Docker-safe name followed by a numeric
 port, so similarly prefixed model names are not included in its logs or stops.
 
 | Task | Command |
 |---|---|
+| Start an embedding encoder by CLI alias (Snowflake) | `harinezumigel-llm-stack snowflake-embedder --start` |
+| Start a cross-encoder by CLI alias (mMARCO) | `harinezumigel-llm-stack mmarco-reranker --start` |
+| Start the BGE embedding encoder by CLI alias | `harinezumigel-llm-stack bge-m3-embedder --start` |
+| Start the BGE cross-encoder by CLI alias | `harinezumigel-llm-stack bge-reranker --start` |
 | Select several backends without a group | `harinezumigel-llm-stack mistral guard judge --start` |
 | Wait for one backend with bounded startup logs | `harinezumigel-llm-stack mistral --start --startup-logs` |
 | Use a different readiness deadline | `harinezumigel-llm-stack --group rag --start --startup-timeout 600` |
@@ -736,8 +765,8 @@ This calls Mistral directly through the proxy, not the complete RAG workflow.
 | Driver compatibility failure | Compare `nvidia-smi` with `VLLM_DOCKER_IMAGE` requirements. Choose a compatible image or upgrade the driver, then explicitly recreate affected containers. |
 | Insufficient VRAM / OOM | Stop the other workload first. Reduce context, concurrency, or memory budget only as appropriate; too small a budget cannot hold the weights/cache. Recreate to apply changes. |
 | Request authentication failure | Use `LITELLM_MASTER_KEY` for clients; verify `litellm_params.api_key` references `LOCAL_VLLM_API_KEY` for backends. Recreate/restart affected services after key changes. |
-| API model not found | Use YAML `model_name`, not the CLI alias; keep `litellm_params.model` consistent with the backend's served name. |
-| Configuration changes ignored | Recreate vLLM containers; stop/start LiteLLM or recreate its group to reload the proxy config. |
+| API model not found / invalid model | Use YAML `model_name` or a configured `router_settings.model_group_alias`, not a CLI-only alias. For BGE embeddings use `bge-m3-embedder` (or `bge-m3`), not `BAAI/bge-m3`. Keep `litellm_params.model` consistent with the backend's served name. |
+| Configuration changes ignored | Stop/start only LiteLLM for proxy routing or API-alias changes. Recreate affected vLLM containers only when their startup settings change. |
 | Reused proxy venv has conflicts | Run `/opt/litellm/venv/bin/pip check`; rerun the installer and choose reinstallation if needed. |
 
 For startup failures, inspect the relevant model's `--show-log --tail 100`

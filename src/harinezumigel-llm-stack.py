@@ -129,7 +129,7 @@ from hls_selection import load_groups, select_models
 from hls_preflight import PreflightChecks
 from hls_terminal import terminal_style, terminal_print as print
 
-__version__ = "1.5.0/81 10/26/2026"
+__version__ = "1.5.1/90 10/28/2026"
 
 
 def style_help(text: str, program: str) -> str:
@@ -1460,6 +1460,8 @@ Examples:
 
     {prog} {"mistral_7b --start":<42} # start using model name
     {prog} {"coder --start":<42} # start using alias (if configured)
+    {prog} {"snowflake-embedder --start":<42} # embedding encoder alias (Snowflake)
+    {prog} {"mmarco-reranker --start":<42} # cross-encoder alias (mMARCO)
     {prog} {"mistral_7b --start --stream-log":<42} # start and follow logs (stays attached)
     {prog} {"mistral_7b --start --dry-run":<42} # preview what would be done
     {prog} {"mistral_7b --start --recreate":<42} # force recreate container
