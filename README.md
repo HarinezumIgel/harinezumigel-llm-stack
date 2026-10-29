@@ -10,6 +10,19 @@ launcher handles model selection, container reuse, startup monitoring, and logs.
 This is not limited to NVIDIA DGX Spark: your host architecture, GPU, and driver
 must support the selected NVIDIA NGC vLLM image.
 
+## LiteLLM October 2026 Incident
+
+For detailed discussion of the LiteLLM October 2026 compromise,
+forensic indicators, audit records, and project-specific mitigations,
+see:
+- [Project-specific mitigations and incident response](security_incidents/litellm-oct-2026.md)
+
+
+Here are the LiteLLM ressources related to this security incident:
+
+- [Upstream advisory](https://docs.litellm.ai/blog/security-incident-oct-21-2026)
+- [Upstream investigation](https://docs.litellm.ai/blog/security-incident-oct-21-2026-attack-chain
+
 ## Use case: experiment with RAG encoders and rerankers
 
 Imagine you have a RAG system and want to compare embedding encoders and
@@ -137,51 +150,54 @@ everyone else read-only permissions. The launcher is then made executable
 with `chmod +x`; its helper modules only need to be readable.
 
 The interactive installer checks prerequisites, installs PyYAML, creates
-`/opt/litellm`, offers to copy the configuration examples, and installs/upgrades
-LiteLLM **1.106.2**, the October incident advisory's recommended fallback,
-in `/opt/litellm/venv`.
-The installer downloads the platform-specific wheel from PyPI's file host with a pinned
-SHA-256 hash, bypasses pip's cache, and requires a successful `pip check`.
-It does not automatically track newer LiteLLM releases.
-Proxy dependencies, including Prisma, are resolved by pip for the target
-environment rather than copied from a single host's installed versions.
-PyYAML **6.0.3** is the exception: the proxy and launcher pip fallback use
-the shared `pyyaml_requirements` definition in [install.sh](install.sh) with
-`--require-hashes --only-binary=:all:`. It includes hashes for all published
-non-yanked wheels of that release. Missing compatible wheels and hash mismatches
-abort installation. The installer downloads and hash-verifies PyYAML for the proxy into a private
-temporary directory first, then installs that verified local wheel alongside
-the hash-pinned LiteLLM wheel. No unverified PyYAML copy is installed first.
-Installation requires a successful `pip check`.
-PyYAML installed through apt/dnf remains managed by signed OS repositories and
-is not frozen to the pip version.
-The NVIDIA image digest covers Linux amd64/arm64, not arbitrary Unix kernels.
-GPU passthrough, compatible host drivers, and compatible Python dependencies
-are still required. Digest/hash pins identify content; they do not make an
-otherwise incompatible platform supported.
-Compromised **1.107.0** and October startup-hook indicators block installation,
-proxy startup, and batch reuse; historical March releases remain blocked too.
-See the [October incident response and exposure windows](security_incidents/litellm-oct-2026.md).
+The installer creates `/opt/litellm`, offers to copy the configuration examples,
+and installs LiteLLM in `/opt/litellm/venv`:
+
+- **LiteLLM:** pins **1.106.2**, the October incident advisory's recommended
+  fallback. It downloads the platform-specific wheel from PyPI's file host,
+  verifies its SHA-256 hash, bypasses pip's cache, and requires a successful
+  `pip check`. It does not automatically track newer releases.
+- **Other proxy dependencies:** pip resolves packages such as Prisma for the
+  target environment; their versions are not individually hash-pinned.
+- **PyYAML:** pins **6.0.3** and uses the shared `pyyaml_requirements`
+  definition in [install.sh](install.sh), with
+  `--require-hashes --only-binary=:all:`. The approved hashes cover all
+  published non-yanked wheels. The installer downloads and verifies PyYAML
+  into a private temporary directory before installing the verified wheel
+  alongside LiteLLM. Missing compatible wheels or hash mismatches abort
+  installation. Apt/dnf PyYAML remains managed by signed OS repositories and
+  is not frozen to the pip version.
+- **NVIDIA image:** the example digest covers Linux amd64/arm64, not arbitrary
+  Unix kernels. GPU passthrough, compatible host drivers, and compatible Python
+  dependencies are still required. A digest or hash pin does not make an
+  otherwise incompatible platform supported.
+- **Compromise protections:** compromised **1.107.0**, October startup-hook
+  indicators, and historical March releases are blocked during installation,
+  proxy startup, and batch reuse. See the
+  [October incident response and exposure windows](security_incidents/litellm-oct-2026.md).
+
 Add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile if needed.
 
 ### LiteLLM version output and startup logs (since 1.5.2)
 
-The launcher prints `LiteLLM version: <installed version>` when starting the
-proxy, including background, streamed, and `litellm --start --dry-run` starts.
-It reads the installed package metadata after the filesystem security check;
-it does not execute `litellm --version` or import LiteLLM to identify the version.
-The installer also reports the installed version after verification.
-Batch/group dry-runs also print the installed version when previewing proxy
-recreation or reuse. For reuse, this is not verification of the running
-process's version.
+The launcher and installer report the installed LiteLLM version:
+
+- The launcher prints `LiteLLM version: <installed version>` on direct
+  background and streamed starts, and on `litellm --start --dry-run`.
+- Batch/group dry-runs print the version when previewing proxy recreation or
+  reuse. For reuse, this is the installed package version, not verification of
+  the running process's version.
+- Version lookup reads package metadata after the filesystem security check; it
+  does not execute `litellm --version` or import LiteLLM.
+- The installer reports the installed version after verification.
 
 Actual launches append a JSON `litellm_start_attempt` record to the proxy log
-before execution, containing `litellm_version`, `launcher_version`, and a UTC
-`timestamp`. This records a start attempt, not confirmed readiness.
-Dry-runs do not execute the proxy or create a startup log record; reusing an
-already-running proxy does not append one either.
+before execution. Each record contains `litellm_version`, `launcher_version`,
+and a UTC `timestamp`; it records an attempt, not confirmed readiness.
+Dry-runs do not execute the proxy or create a startup record, and reusing an
+already-running proxy does not append one.
 See [startup audit records](security_incidents/litellm-oct-2026.md#proxy-startup-audit-records-since-152)
-for limitations when investigating historical exposure.
+for investigation limitations.
 
 ### Platform compatibility and installation failures
 
