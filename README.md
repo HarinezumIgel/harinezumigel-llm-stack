@@ -18,10 +18,10 @@ see:
 - [Project-specific mitigations and incident response](security_incidents/litellm-oct-2026.md)
 
 
-Here are the LiteLLM ressources related to this security incident:
+Related LiteLLM security resources:
 
 - [Upstream advisory](https://docs.litellm.ai/blog/security-incident-oct-21-2026)
-- [Upstream investigation](https://docs.litellm.ai/blog/security-incident-oct-21-2026-attack-chain
+- [Upstream investigation](https://docs.litellm.ai/blog/security-incident-oct-21-2026-attack-chain)
 
 ## Use case: experiment with RAG encoders and rerankers
 
