@@ -46,6 +46,8 @@ model_list:
   # - Sampling defaults belong in model_info.override_generation_config.
   # - Explicit request sampling parameters override these backend defaults.
   # - Pooling models are auto-detected by the configured vLLM image.
+  # - model_info.mode groups startup summaries and log hints only in the launcher.
+  # - Missing mode (or chat) displays as Inference; embedding/rerank stay separate.
   # - max_output_tokens: 1 is launcher metadata only for pooling models.
   # - Each RAG group budgets 0.71 for chat models + 0.08 + 0.08 = 0.87.
   # ---------------------------------------------------------------------------
@@ -168,6 +170,7 @@ model_list:
       request_timeout: 14400
     rebuild: true
     model_info:
+      mode: inference
       model_dir: llama-guard3-8b
       generation_config: vllm
       override_generation_config:
@@ -206,6 +209,7 @@ model_list:
       request_timeout: 90
     rebuild: true
     model_info:
+      mode: inference
       model_dir: llama3.1-8b
       generation_config: vllm
       override_generation_config:
@@ -247,6 +251,7 @@ model_list:
       request_timeout: 90
     rebuild: true
     model_info:
+      mode: inference
       model_dir: mistral-7b-instruct-v0.3
       generation_config: vllm
       override_generation_config:
@@ -286,6 +291,7 @@ model_list:
       request_timeout: 180
     rebuild: true
     model_info:
+      mode: inference
       model_dir: qwen2.5-32b-awq
       context_length: 32768
       max_input_tokens: 28672
@@ -327,6 +333,7 @@ model_list:
       request_timeout: 240
     rebuild: true
     model_info:
+      mode: inference
       model_dir: Qwen3-Coder-Next-AWQ
       context_length: 262144
       max_input_tokens: 250000
@@ -372,6 +379,7 @@ model_list:
       request_timeout: 240
     rebuild: true
     model_info:
+      mode: inference
       model_dir: Qwen3.6-27B
       context_length: 65536
       max_input_tokens: 60000
@@ -417,6 +425,7 @@ model_list:
       request_timeout: 120
     rebuild: true
     model_info:
+      mode: inference
       model_dir: deepseek-coder-6.7b-instruct
       context_length: 32768
       max_input_tokens: 28000
@@ -460,6 +469,7 @@ model_list:
     rebuild: true
 
     model_info:
+      mode: inference
       model_dir: Qwen2.5-1.5B-Instruct
 
       context_length: 8192
@@ -519,6 +529,7 @@ model_list:
     rebuild: true
 
     model_info:
+      mode: inference
       model_dir: Qwen2.5-14B-Instruct
       generation_config: vllm
       override_generation_config:
@@ -588,6 +599,7 @@ model_list:
     rebuild: true
 
     model_info:
+      mode: inference
       model_dir: Qwen3.5-122B-A10B-int4-AutoRound
 
       context_length: 196608
@@ -634,6 +646,7 @@ model_list:
       request_timeout: 300
     rebuild: true
     model_info:
+      mode: inference
       model_dir: Qwen3.8-27B
       generation_config: vllm
       override_generation_config:
@@ -682,6 +695,7 @@ model_list:
       request_timeout: 300
     rebuild: true
     model_info:
+      mode: inference
       model_dir: Qwen3-Coder-30B-A3B-Instruct
       generation_config: vllm
       override_generation_config:

@@ -93,6 +93,12 @@ once. Groups make it easier to manage the services belonging to each workload.
 The host IP and ports shown here match the configuration example; adapt them
 to your deployment.
 
+## LiteLLM October 2026 Incident
+
+For detailed discussion of the LiteLLM October 2026 compromise,
+forensic indicators, audit records, and project-specific mitigations,
+see [project-specific mitigations](https://github.com/HarinezumIgel/harinezumigel-llm-stack/blob/main/security_incidents/litellm-oct-2026.md).
+
 ## Get started
 
 1. Read the [requirements and installation guide](https://github.com/Harinezumigel/harinezumigel-llm-stack#install-from-any-checkout-location).
@@ -171,6 +177,13 @@ harinezumigel-llm-stack all --show-log-path
 
 `--stream-log` follows one target indefinitely; group commands do not support
 indefinite log following. Group starts monitor backend readiness and then return.
+After group/batch startup, separate log-following commands are printed for each
+selected target, including LiteLLM when listed, whether started or reused.
+Dry-runs do not print these reminders.
+Startup summaries and log-following hints group targets by `model_info.mode`:
+Inference (`inference`, `chat`, or omitted), Embeddings (`embedding`), Reranking
+(`rerank`), and Proxy (LiteLLM). Other modes retain their own category. Categories
+appear in first-selection order; execution order and other output are unchanged.
 Backend streaming shows only the latest container run, not earlier shutdowns.
 `--show-log` without following shows all saved history unless limited with
 `--tail N`; neither operation deletes logs.

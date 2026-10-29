@@ -123,13 +123,15 @@ from hls_startup import (
     StartupError,
     StartupJob,
     container_started_at,
+    group_startup_jobs,
     run_startup,
 )
 from hls_selection import load_groups, select_models
 from hls_preflight import PreflightChecks
+from hls_litellm_security import LiteLLMSecurityError, check_litellm_environment
 from hls_terminal import terminal_style, terminal_print as print
 
-__version__ = "1.5.1/90 10/28/2026"
+__version__ = "1.5.2/99 10/29/2026"
 
 
 def style_help(text: str, program: str) -> str:
@@ -714,6 +716,17 @@ class ModelDeployment:  # pylint: disable=too-many-instance-attributes
     detail: str | None
     allow_rebuild: bool
     rebuild_key_present: bool = False
+
+    def display_mode(self) -> str:
+        """Resolve the informational category without changing backend behavior."""
+        mode = self.model_info.get("mode", "inference")
+        if not isinstance(mode, str) or not mode.strip():
+            print(
+                f"ERROR: Model '{self.name}': model_info.mode must be a nonempty string"
+            )
+            sys.exit(1)
+        mode = mode.strip().lower()
+        return "inference" if mode == "chat" else mode
 
     def generation_settings(self) -> tuple[str, str | None]:
         """Resolve and validate generation defaults before lifecycle operations."""
@@ -2443,6 +2456,28 @@ Examples:
     # LiteLLM lifecycle
     # ------------------------------------------------------------------
 
+    def _check_litellm_security(self) -> str:
+        """Block compromised installations without executing their interpreter."""
+        venv = Path(self.config.litellm_venv_activate).parent.parent
+        try:
+            version = check_litellm_environment(venv)
+            if version is None:
+                raise LiteLLMSecurityError(
+                    "Cannot determine the installed LiteLLM package version."
+                )
+            if (
+                Path(self.config.litellm_bin).resolve()
+                != (venv / "bin" / "litellm").resolve()
+            ):
+                raise LiteLLMSecurityError(
+                    "LITELLM_BIN must use the environment selected by "
+                    "LITELLM_VENV_ACTIVATE; refusing to run an unchecked executable."
+                )
+            return version
+        except LiteLLMSecurityError as error:
+            print(f"ERROR: {error}")
+            sys.exit(1)
+
     def start_litellm(self, *, dry_run: bool = False, follow_log: bool = False) -> None:
         """Start LiteLLM proxy.
 
@@ -2456,6 +2491,7 @@ Examples:
         - Checks if port is already in use before starting
         - Respects dry_run flag
         """
+        litellm_version = self._check_litellm_security()
         existing_pids = self._find_litellm_pids()
         my_pid = str(os.getpid())
 
@@ -2501,6 +2537,9 @@ Examples:
             if self.litellm_detailed_debug
             else (" --debug" if self.litellm_debug else "")
         )
+        venv_python = shlex.quote(
+            str(Path(self.config.litellm_venv_activate).parent / "python")
+        )
 
         command = (
             f"set -a && "
@@ -2511,7 +2550,8 @@ Examples:
             f"source {self.config.litellm_venv_activate} && "
             # litellm CLI does bare `from proxy_server import` which only works when
             # the proxy package directory is on PYTHONPATH
-            f'export PYTHONPATH="$(python -c \'import litellm,os;print(os.path.dirname(litellm.__file__)+"/proxy")\')" && '
+            f"export PYTHONPATH=\"$({venv_python} -I -c 'import litellm,os;"
+            'print(os.path.dirname(litellm.__file__)+"/proxy")\')" && '
             f"{self.config.litellm_bin} --config {self.config.litellm_config} "
             f"--host {self.config.litellm_bind_host} "
             f"--port {self.config.litellm_port}{debug_flag}"
@@ -2526,6 +2566,7 @@ Examples:
             f"\n=== Starting LiteLLM router on "
             f"{self.config.litellm_bind_host}:{self.config.litellm_port} ==="
         )
+        print(f"LiteLLM version: {litellm_version}")
         print(f"Config: {self.config.litellm_config}")
         print(f"Log file: {log_path}")
         print()
@@ -2561,6 +2602,20 @@ Examples:
         print("LiteLLM command:", command)
 
         if not dry_run:
+            record = {
+                "event": "litellm_start_attempt",
+                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "litellm_version": litellm_version,
+                "launcher_version": __version__,
+            }
+            try:
+                with log_path.open("a", encoding="utf-8") as log:
+                    log.write(json.dumps(record) + "\n")
+            except OSError as error:
+                print(
+                    f"ERROR: Cannot write LiteLLM startup record to {log_path}: {error}"
+                )
+                sys.exit(1)
             if follow_log:
                 _stream_formatted_logs(
                     ["bash", "-lc", streaming_command],
@@ -2710,9 +2765,11 @@ Examples:
 
     def _start_litellm_for_batch(self, *, dry_run: bool, recreate: bool) -> None:
         """Reuse this config's LiteLLM process, or explicitly restart it."""
+        litellm_version = self._check_litellm_security()
         if recreate:
             self.stop_litellm(dry_run=dry_run)
             if dry_run:
+                print(f"LiteLLM version: {litellm_version}")
                 print("Dry run only. LiteLLM would be started after the stop.")
                 return
 
@@ -2724,6 +2781,11 @@ Examples:
         else:
             pids = [pid for pid in self._find_litellm_pids() if pid != str(os.getpid())]
             if pids:
+                if dry_run:
+                    print(
+                        f"LiteLLM version: {litellm_version} "
+                        "(installed package; running process version not verified)"
+                    )
                 print(
                     "Reusing running LiteLLM for this configuration "
                     f"(PID(s): {', '.join(pids)}); configuration is not reloaded."
@@ -3134,6 +3196,7 @@ Examples:
                         reused=False,
                         secrets=(),
                         monitor=False,
+                        mode="proxy",
                     )
                 )
                 continue
@@ -3148,6 +3211,7 @@ Examples:
                     reused=not args.recreate
                     and self._docker_container_state(backend.container) == "running",
                     secrets=(model.api_key, os.environ.get("LOCAL_VLLM_API_KEY", "")),
+                    mode=model.display_mode(),
                 )
             )
         exit_code = run_startup(
@@ -3161,7 +3225,7 @@ Examples:
         )
         if exit_code:
             sys.exit(exit_code)
-        if not args.dry_run and selected_models:
+        if not args.dry_run and selected:
             if args.group is not None or len(args.models) > 1:
                 print(
                     "\nTo keep following logs after group/batch startup, "
@@ -3169,11 +3233,11 @@ Examples:
                 )
             else:
                 print("\nTo keep following this model's logs, run:")
-            for model in selected_models:
-                print(
-                    f"  {program_name()} {shlex.quote(model.alias or model.name)} "
-                    "--stream-log"
-                )
+            for category, members in group_startup_jobs(jobs).items():
+                print("\n" + terminal_style(category, accent=True))
+                for job in members:
+                    label = "litellm" if job.name == "litellm" else job.label
+                    print(f"  {program_name()} {shlex.quote(label)} --stream-log")
 
     def _show_startup_failure_logs(self, job: StartupJob) -> None:
         """Show diagnostics only if Docker created a container for this launch."""

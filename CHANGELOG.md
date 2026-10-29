@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [29/10/2026]
+
+### Added
+- Append the checked LiteLLM package version, launcher version, and UTC timestamp
+  to proxy logs before background or streamed startup; abort if recording fails.
+- Print the installed LiteLLM version at startup, including dry-runs, without
+  importing LiteLLM; identify the launcher as 1.5.2/91 in output and audit records.
+
+### Security
+- Hash-pin PyYAML 6.0.3 for the proxy and launcher pip fallback using all
+  published non-yanked wheels. Resolve other proxy dependencies per host
+  rather than locking one host's complete environment. Keep apt/dnf PyYAML OS-managed.
+- Pin the example NVIDIA vLLM image to its registry-verified multi-platform
+  SHA-256 digest; document Docker's content verification and explicit pin updates.
+- Block October's compromised LiteLLM 1.107.0 and `cook`/`sitecustomize`
+  startup-hook indicators before installation, proxy startup, or batch reuse.
+  Retain blocks for historical March releases 1.82.7/1.82.8 and `litellm_init.pth`.
+  Inspect files without starting the affected environment's Python or pip.
+- Install October's recommended fallback LiteLLM 1.106.2 using platform-specific
+  wheel URLs and SHA-256 hashes, with cache bypass and forced reinstall. Dependency-check
+  failures now abort setup.
+- Document credential rotation, host investigation, and trusted rebuilds;
+  upgrading the package alone does not remediate an affected host.
+- Document October 21 PyPI and Docker exposure windows, including compromised
+  official images; do not use March indicators as an October safety assessment.
+
 ## [10/28/2026 Revision 90]
 
 ### Added

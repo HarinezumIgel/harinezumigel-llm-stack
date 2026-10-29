@@ -71,6 +71,7 @@ class TestMultiModel(unittest.TestCase):
         self.stack.load_models()
         self.output = io.StringIO()
         self.addCleanup(patch.stopall)
+        patch.object(app, "check_litellm_environment", return_value="1.106.2").start()
         patch.object(self.stack, "_docker_container_state", return_value=None).start()
         patch.object(
             self.stack, "_find_running_vllm_containers", return_value=[]
@@ -772,10 +773,116 @@ class TestMultiModel(unittest.TestCase):
         self.assertIn("after group/batch startup", text)
         self.assertIn(f"{app.program_name()} first --stream-log", text)
         self.assertIn(f"{app.program_name()} second --stream-log", text)
+        self.assertNotIn(f"{app.program_name()} litellm --stream-log", text)
         self.assertNotIn("add --stream-log", text)
 
+    def test_start_log_hints_include_selected_litellm_in_order(self):
+        self.data["model_groups"]["stack"] = ["first", "lite-llm", "second"]
+        self.data["model_groups"]["proxy"] = ["litellm"]
+        self.write_config()
+        selections = [
+            (("--group", "stack"), ["first", "second", "litellm"]),
+            (("first", "llm-lite", "second"), ["first", "second", "litellm"]),
+            (("--group", "proxy"), ["litellm"]),
+        ]
+        for selection, targets in selections:
+            for pids in ([], ["123"]):
+                with (
+                    self.subTest(selection=selection, pids=pids),
+                    patch.object(self.stack, "_find_litellm_pids", return_value=pids),
+                ):
+                    self.output.seek(0)
+                    self.output.truncate()
+                    self.run_command(*selection, "--start")
+                    commands = [
+                        line.strip()
+                        for line in self.output.getvalue().splitlines()
+                        if line.endswith(" --stream-log")
+                    ]
+                    self.assertEqual(
+                        commands,
+                        [
+                            f"{app.program_name()} {target} --stream-log"
+                            for target in targets
+                        ],
+                    )
+
+    def test_startup_display_groups_modes_without_reordering_launches(self):
+        self.data["model_groups"]["stack"] = ["first", "litellm", "second", "first"]
+        self.data["model_list"][0]["model_info"]["mode"] = "embedding"
+        self.data["model_list"][1]["model_info"]["mode"] = "rerank"
+        self.write_config()
+        self.run_command("--group", "stack", "--start")
+        self.assertEqual(
+            [call.args[0].name for call in self.start.call_args_list],
+            ["model_a", "model_b"],
+        )
+        text = self.output.getvalue()
+        summary = text.split("=== Startup summary ===", 1)[1]
+        for category, target in (
+            ("Embeddings", "first"),
+            ("Proxy", "LiteLLM"),
+            ("Reranking", "second"),
+        ):
+            self.assertIn(f"\n{category}\n{target}", summary)
+        self.assertIn(f"\nEmbeddings\n  {app.program_name()} first --stream-log", text)
+        self.assertIn(f"\nProxy\n  {app.program_name()} litellm --stream-log", text)
+        self.assertIn(f"\nReranking\n  {app.program_name()} second --stream-log", text)
+
+    def test_startup_display_mode_defaults_and_unknown_modes(self):
+        model = self.stack.models["model_a"]
+        self.assertEqual(model.display_mode(), "inference")
+        for mode, expected in (
+            ("inference", "inference"),
+            ("chat", "inference"),
+            (" embedding ", "embedding"),
+            ("audio", "audio"),
+        ):
+            with self.subTest(mode=mode):
+                model.model_info["mode"] = mode
+                self.assertEqual(model.display_mode(), expected)
+
+    def test_startup_category_headings_use_configured_accent(self):
+        for color, code in (("cyan", "36"), ("blue", "34")):
+            with (
+                self.subTest(color=color),
+                patch.dict(
+                    os.environ,
+                    {"TERM": "xterm", "HLS_ACCENT_COLOR": color},
+                    clear=True,
+                ),
+                patch.object(self.output, "isatty", return_value=True),
+            ):
+                self.output.seek(0)
+                self.output.truncate()
+                self.run_command("--group", "rag", "--start")
+                self.assertEqual(
+                    self.output.getvalue().count(f"\033[{code}mInference\033[0m"),
+                    2,
+                )
+
+    def test_invalid_display_mode_fails_before_launch(self):
+        for mode in (None, "", 42, []):
+            with self.subTest(mode=mode):
+                self.data["model_list"][0]["model_info"]["mode"] = mode
+                self.write_config()
+                with self.assertRaises(SystemExit):
+                    self.run_command("--group", "rag", "--start")
+                self.start.assert_not_called()
+                self.start_litellm.assert_not_called()
+                self.assertIn("model_info.mode", self.output.getvalue())
+
     def test_start_log_hints_are_suppressed_for_dry_runs(self):
-        selections: list[tuple[str, ...]] = [("first",), ("--group", "rag")]
+        self.data["model_groups"]["stack"] = ["first", "litellm"]
+        self.data["model_groups"]["proxy"] = ["litellm"]
+        self.write_config()
+        selections: list[tuple[str, ...]] = [
+            ("first",),
+            ("--group", "rag"),
+            ("--group", "stack"),
+            ("--group", "proxy"),
+            ("first", "litellm"),
+        ]
         for selection in selections:
             with self.subTest(selection=selection):
                 self.output.seek(0)

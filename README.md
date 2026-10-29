@@ -103,7 +103,9 @@ Use the directory names in the
 
 ### Requirements
 
-- Unix host, Python 3.10+, and [PyYAML](https://pyyaml.org/).
+- Python 3.10+ and [PyYAML](https://pyyaml.org/). The installer's pinned
+  LiteLLM wheel selector supports Linux glibc/musl on arm64/amd64;
+  other Unix hosts are not automatically supported.
 - Docker with NVIDIA Container Toolkit and working GPU passthrough
   (`--gpus all`); `nvidia-smi` available on the host.
 - An NVIDIA GPU, driver, and CPU architecture compatible with your chosen
@@ -136,8 +138,81 @@ with `chmod +x`; its helper modules only need to be readable.
 
 The interactive installer checks prerequisites, installs PyYAML, creates
 `/opt/litellm`, offers to copy the configuration examples, and installs/upgrades
-`litellm[proxy]` in `/opt/litellm/venv` with a final `pip check`.
+LiteLLM **1.106.2**, the October incident advisory's recommended fallback,
+in `/opt/litellm/venv`.
+The installer downloads the platform-specific wheel from PyPI's file host with a pinned
+SHA-256 hash, bypasses pip's cache, and requires a successful `pip check`.
+It does not automatically track newer LiteLLM releases.
+Proxy dependencies, including Prisma, are resolved by pip for the target
+environment rather than copied from a single host's installed versions.
+PyYAML **6.0.3** is the exception: the proxy and launcher pip fallback use
+the shared `pyyaml_requirements` definition in [install.sh](install.sh) with
+`--require-hashes --only-binary=:all:`. It includes hashes for all published
+non-yanked wheels of that release. Missing compatible wheels and hash mismatches
+abort installation. The installer downloads and hash-verifies PyYAML for the proxy into a private
+temporary directory first, then installs that verified local wheel alongside
+the hash-pinned LiteLLM wheel. No unverified PyYAML copy is installed first.
+Installation requires a successful `pip check`.
+PyYAML installed through apt/dnf remains managed by signed OS repositories and
+is not frozen to the pip version.
+The NVIDIA image digest covers Linux amd64/arm64, not arbitrary Unix kernels.
+GPU passthrough, compatible host drivers, and compatible Python dependencies
+are still required. Digest/hash pins identify content; they do not make an
+otherwise incompatible platform supported.
+Compromised **1.107.0** and October startup-hook indicators block installation,
+proxy startup, and batch reuse; historical March releases remain blocked too.
+See the [October incident response and exposure windows](security_incidents/litellm-oct-2026.md).
 Add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile if needed.
+
+### LiteLLM version output and startup logs (since 1.5.2)
+
+The launcher prints `LiteLLM version: <installed version>` when starting the
+proxy, including background, streamed, and `litellm --start --dry-run` starts.
+It reads the installed package metadata after the filesystem security check;
+it does not execute `litellm --version` or import LiteLLM to identify the version.
+The installer also reports the installed version after verification.
+Batch/group dry-runs also print the installed version when previewing proxy
+recreation or reuse. For reuse, this is not verification of the running
+process's version.
+
+Actual launches append a JSON `litellm_start_attempt` record to the proxy log
+before execution, containing `litellm_version`, `launcher_version`, and a UTC
+`timestamp`. This records a start attempt, not confirmed readiness.
+Dry-runs do not execute the proxy or create a startup log record; reusing an
+already-running proxy does not append one either.
+See [startup audit records](security_incidents/litellm-oct-2026.md#proxy-startup-audit-records-since-152)
+for limitations when investigating historical exposure.
+
+### Platform compatibility and installation failures
+
+The pinned artifacts were validated on **Linux/glibc arm64 and amd64**.
+A package can download successfully but still fail to install or run because
+its Python ABI, CPU architecture, libc, or driver requirements do not match.
+The LiteLLM selector also lists musl wheels, and the PyYAML lock includes other
+platforms, but that does not establish that the complete stack works there.
+
+On another distribution or Unix host, review and, where necessary, adjust:
+
+- **PyYAML:** select wheels matching your Python version, architecture, and OS,
+  and record their verified SHA-256 hashes in
+  the `pyyaml_requirements` definition in [install.sh](install.sh). Prefer your
+  distribution's signed PyYAML package for the launcher when available.
+- **LiteLLM:** select a trusted, unaffected release and compatible wheel;
+  update the version, platform selector, URLs, and hashes together in
+  [hls_litellm_security.py](src/hls_litellm_security.py). Its current selector
+  supports Linux glibc/musl arm64/amd64, not other Unix platforms.
+- **NVIDIA vLLM image:** select a Linux image compatible with the Docker host's
+  architecture, NVIDIA driver, and GPU runtime. Set its verified digest in
+  `VLLM_DOCKER_IMAGE` in your installed `config/env`. A multi-platform digest
+  supports only the platforms actually included in that image index.
+
+These are not guarantees of macOS, BSD, or other Unix support: the GPU backends
+require a compatible Linux Docker host with NVIDIA GPU passthrough. Some
+platforms need a different deployment arrangement rather than different pins.
+Read the original installation error first; network, permissions, dependency,
+and hash-verification failures are not necessarily platform mismatches.
+Never disable hash verification to get past an error, and never replace a hash
+solely because the downloaded artifact did not match it.
 
 Deployment files are separate from the checkout:
 
@@ -212,6 +287,10 @@ Edit `/opt/litellm/config/env`:
 - Check `LITELLM_BIN` and `LITELLM_VENV_ACTIVATE` point to your proxy environment.
 - Choose a `VLLM_DOCKER_IMAGE` compatible with your host; check `nvidia-smi`
   and the image's requirements rather than assuming the example tag fits.
+  Pin it with `@sha256:...`, as in the example, so a moved tag cannot silently
+  change the selected image. Docker verifies the manifest and layer digests;
+  a separate checksum implementation is unnecessary. See
+  [backend image verification](SECURITY.md#nvidia-backend-image-pinning).
 - Replace **both** placeholder keys: `LITELLM_MASTER_KEY` authenticates clients
   to the proxy; `LOCAL_VLLM_API_KEY` authenticates proxy-to-backend requests.
 - The example exposes LiteLLM on the target host's LAN IP and keeps vLLM
@@ -609,7 +688,7 @@ harinezumigel-llm-stack all --stop
   container.
 - If missing locally, Docker pulls the vLLM server image specified by
   `VLLM_DOCKER_IMAGE` in `/opt/litellm/config/env`
-  (`nvcr.io/nvidia/vllm:26.05.post1-py3` in the example configuration).
+  (the digest-pinned `nvcr.io/nvidia/vllm:26.05.post1-py3` release in the example).
   This is the container image, not the model files; an existing local image is
   not updated by this check.
 - Confirmed driver-version mismatches abort startup and dry runs; other
@@ -660,8 +739,17 @@ port, so similarly prefixed model names are not included in its logs or stops.
 `--stream-log` is shorthand for `--show-log --follow`; do not combine them.
 Single-model starts without log streaming print a reminder to add `--stream-log`,
 plus a command to follow the running model's logs. After group/batch startup,
-the launcher prints separate `<model> --stream-log` commands; streaming a whole
-group indefinitely is not supported. Dry-runs do not print these reminders.
+the launcher prints separate `<target> --stream-log` commands, including
+`litellm --stream-log` when LiteLLM is selected (even if already running).
+Streaming a whole group indefinitely is not supported. Dry-runs do not print
+these reminders.
+Startup summaries and these log-following hints are grouped by `model_info.mode`:
+`inference`, `embedding`, and `rerank`, with LiteLLM under Proxy. Missing mode and
+`chat` display as Inference; other explicit modes retain their own category.
+Categories and targets within each category use first-selection order. This only
+changes display, not startup order, backend task detection, or other command output.
+Category headings use the configured accent color (`HLS_ACCENT_COLOR`, cyan by
+default), respecting non-interactive output and `NO_COLOR`.
 Batch selections reject indefinite following; follow one target separately
 after startup. `all --show-log` shows log paths rather than merged streams.
 JSON-escaped stack traces are expanded for readability.
@@ -840,6 +928,16 @@ imply affiliation, sponsorship, or endorsement.
 This software is provided **as is**, without warranty of any kind, as described
 in the [MIT license](LICENSE). You are responsible for reviewing configuration,
 testing your deployment, and deciding whether it is suitable for your use.
+
+- **Third-party software:** This project integrates with third-party software
+  and services, including LiteLLM, vLLM, Docker, NVIDIA container images,
+  Python packages, model providers, and operating-system packages. Security
+  incidents, vulnerabilities, supply-chain compromises, licensing changes,
+  and operational failures affecting those components may affect systems,
+  environments, or deployments managed by this project. References to upstream
+  software, versions, advisories, mitigations, example configurations, or
+  compatibility guidance do not constitute an audit, certification,
+  endorsement, or security guarantee of those components.
 
 - **Operational risk:** Starting models consumes GPU memory, system memory,
   disk space, power, and network bandwidth. Resource checks do not guarantee

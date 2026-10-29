@@ -1940,6 +1940,13 @@ class TestSafetyGuards(unittest.TestCase):
     """Test that destructive operations are properly guarded."""
 
     def setUp(self):
+        security_patch = patch.object(
+            harinezumigel_llm_stack,
+            "check_litellm_environment",
+            return_value="1.106.2",
+        )
+        security_patch.start()
+        self.addCleanup(security_patch.stop)
         log_root = tempfile.TemporaryDirectory()
         self.addCleanup(log_root.cleanup)
         root_patch = patch.object(
@@ -2806,6 +2813,13 @@ class TestCLIProgramName(unittest.TestCase):
     """Keep user-facing commands consistent with the invoked filename."""
 
     def setUp(self) -> None:
+        security_patch = patch.object(
+            harinezumigel_llm_stack,
+            "check_litellm_environment",
+            return_value="1.106.2",
+        )
+        security_patch.start()
+        self.addCleanup(security_patch.stop)
         self.stack = harinezumigel_llm_stack.LLMStack(harinezumigel_llm_stack.APP)
 
     def test_help_examples_are_aligned(self) -> None:

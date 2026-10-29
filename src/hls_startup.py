@@ -43,6 +43,22 @@ class StartupJob:
     reused: bool
     secrets: tuple[str, ...]
     monitor: bool = True
+    mode: str = "inference"
+
+
+def group_startup_jobs(jobs: list[StartupJob]) -> dict[str, list[StartupJob]]:
+    """Group display rows by mode, retaining first-seen category and target order."""
+    groups: dict[str, list[StartupJob]] = {}
+    labels = {
+        "inference": "Inference",
+        "embedding": "Embeddings",
+        "rerank": "Reranking",
+        "proxy": "Proxy",
+    }
+    for job in jobs:
+        label = labels.get(job.mode, job.mode)
+        groups.setdefault(label, []).append(job)
+    return groups
 
 
 def run_startup(
@@ -112,9 +128,13 @@ def run_startup(
             exit_code = 1
             break
     print("\n=== Startup summary ===")
-    for job, result in zip(jobs, results):
-        port = f"port={job.port}" if job.port is not None else "no readiness check"
-        print(f"{job.label:<24} {result:<16} {port}")
+    results_by_name = {job.name: result for job, result in zip(jobs, results)}
+    for category, members in group_startup_jobs(jobs).items():
+        print("\n" + terminal_style(category, accent=True))
+        for job in members:
+            result = results_by_name[job.name]
+            port = f"port={job.port}" if job.port is not None else "no readiness check"
+            print(f"{job.label:<24} {result:<16} {port}")
     return exit_code
 
 

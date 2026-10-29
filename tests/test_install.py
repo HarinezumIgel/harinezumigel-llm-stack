@@ -24,6 +24,46 @@ from fix_settings import link_repository_launcher
 
 
 class TestInstallerConfig(unittest.TestCase):
+    def test_embedded_pyyaml_has_exact_version_and_hashes(self) -> None:
+        import re
+
+        function = (
+            "pyyaml_requirements() {"
+            + INSTALLER.split("pyyaml_requirements() {", 1)[1].split("\n}", 1)[0]
+            + "\n}\n"
+        )
+        result = subprocess.run(
+            ["bash", "-c", function + "pyyaml_requirements"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        content = result.stdout
+        self.assertEqual(content.splitlines()[0], "pyyaml==6.0.3 \\")
+        hashes = re.findall(r"--hash=sha256:([0-9a-f]{64})", content)
+        self.assertEqual(len(hashes), 72)
+        self.assertEqual(len(set(hashes)), 72)
+        self.assertEqual(INSTALLER.count("-r <(pyyaml_requirements)"), 2)
+        self.assertNotIn("requirements-launcher.lock", INSTALLER)
+        self.assertNotIn("requirements-proxy.lock", INSTALLER)
+
+    def test_backend_image_example_is_digest_pinned(self) -> None:
+        lines = (
+            (PROJECT_DIR / "config" / "env.example")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        )
+        images = [
+            line.split("=", 1)[1]
+            for line in lines
+            if line.startswith("VLLM_DOCKER_IMAGE=")
+        ]
+        self.assertEqual(len(images), 1)
+        self.assertRegex(
+            images[0],
+            r"^nvcr\.io/nvidia/vllm:26\.05\.post1-py3@sha256:[0-9a-f]{64}$",
+        )
+
     def test_command_uses_installed_runtime_not_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
