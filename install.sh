@@ -604,7 +604,7 @@ install_litellm_proxy_deps() (
         echo -e "${RED}✗${NC} Could not create a private wheel download directory"
         return 1
     fi
-    trap 'rm -f -- "$wheel_dir"/*.whl; rmdir -- "$wheel_dir"' EXIT
+    trap 'if [[ -d "$wheel_dir" ]]; then rm -f -- "$wheel_dir"/*.whl; rmdir -- "$wheel_dir"; fi' EXIT
     echo "Downloading hash-pinned PyYAML and Prisma before installation."
     if ! "$pip_bin" --isolated download --no-cache-dir --no-deps \
         --require-hashes --only-binary=:all: --index-url https://pypi.org/simple \
