@@ -131,7 +131,7 @@ from hls_preflight import PreflightChecks
 from hls_litellm_security import LiteLLMSecurityError, check_litellm_environment
 from hls_terminal import terminal_style, terminal_print as print
 
-__version__ = "1.5.2/99 10/29/2026"
+__version__ = "1.5.3/102 10/29/2026"
 
 
 def style_help(text: str, program: str) -> str:

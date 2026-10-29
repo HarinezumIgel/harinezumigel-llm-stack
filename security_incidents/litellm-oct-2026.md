@@ -37,10 +37,9 @@ Confirmed installation or execution of **1.107.0** requires incident
 response regardless of date. The automatic checks therefore block these
 versions without applying a time cutoff.
 
-### Proxy startup audit records (since 1.5.2)
+### Proxy startup audit records
 
-Starting with **harinezumigel-llm-stack 1.5.2**, proxy launches append a JSON
-`litellm_start_attempt` record before executing
+Proxy launches append a JSON `litellm_start_attempt` record before executing
 the proxy, with the filesystem-checked `litellm_version`, separate
 `launcher_version`, and an ISO 8601 UTC `timestamp` (`+00:00`). This applies to
 both background and streamed starts; dry-runs and reuse do not append records.
@@ -62,29 +61,37 @@ could execute before the proxy reached application startup. Neither missing
 entries nor a later unaffected run excludes earlier compromise.
 Preserve logs before cleanup and redact secrets before sharing them.
 
+### Install logs
+
+`install.sh` writes install logs to `install_logs/` in the checkout and to
+`/opt/litellm/install_logs/`.
+
 ### Installation and runtime protections
 
 The installer pins **1.106.2**, the explicit fallback recommended in the October
-advisory. It selects a reviewed Linux aarch64/x86_64 glibc/musl wheel from
-`files.pythonhosted.org` with its corresponding pinned SHA-256.
+advisory. It selects a specific Linux aarch64/x86_64 glibc/musl wheel from
+files.pythonhosted.org together with its pinned SHA-256 hash.
 Pip verifies the hash and reinstalls the wheel without using its download cache,
 including when reusing an existing environment. The pin and artifact identity
 are maintained in [hls_litellm_security.py](../src/hls_litellm_security.py);
 new releases require an explicit reviewed update.
 
-Other proxy dependencies, including Prisma, are resolved by pip according to
+Prisma **0.15.0** and PyYAML **6.0.3** are explicitly version- and
+hash-pinned in the shared `prisma_requirements` and `pyyaml_requirements`
+definitions in [install.sh](../install.sh). LiteLLM 1.106.2 declares
+`prisma>=0.11.0,<1.0`; this project selects Prisma 0.15.0 within that
+compatibility range and pins its wheel hash. The PyYAML hashes cover all
+non-yanked PyPI wheels; Prisma currently has one universal wheel.
+
+The installer downloads both proxy packages using
+`--require-hashes --only-binary=:all: --no-deps` into a private temporary
+directory before installing any proxy packages. It then installs those
+verified local wheels alongside the hash-pinned LiteLLM wheel in one pip
+installation and runs `pip check`. A failed hash check aborts before
+installation; there is no initial unverified installation of either package.
+The launcher pip fallback uses the same PyYAML definition. Apt/dnf PyYAML
+remains OS-managed. Other proxy dependencies are resolved by pip according to
 the target environment and LiteLLM's requirements, not a host-specific lock.
-They are not individually hash-pinned. PyYAML **6.0.3** remains explicitly
-version- and hash-pinned in the shared `pyyaml_requirements` definition in
-[install.sh](../install.sh), which lists hashes for all non-yanked PyPI wheels
-for that release.
-The installer downloads PyYAML for the proxy using
-`--require-hashes --only-binary=:all: --no-deps`
-into a private temporary directory before installing any proxy packages.
-It then installs that verified local wheel alongside the hash-pinned LiteLLM
-wheel in one pip installation and runs `pip check`. A failed hash check aborts
-before installation; there is no initial unverified PyYAML installation.
-The launcher pip fallback uses the same embedded definition. Apt/dnf PyYAML remains OS-managed.
 
 The installer requires Python 3.10+; the pinned LiteLLM wheel selector supports
 Linux glibc/musl arm64/amd64, not arbitrary Unix hosts. Compatible dependencies
@@ -111,6 +118,28 @@ Compromised versions, residual indicators, unreadable/ambiguous metadata, and
 environments inheriting system site-packages are rejected. Unaffected existing
 versions remain usable by the launcher; only the installer enforces the pin.
 These checks do not prove an existing environment or running process is clean.
+
+### Project-specific audit evidence
+
+When investigating a deployment managed by harinezumigel-llm-stack,
+review:
+
+- Install logs in the checkout's `install_logs/` directory and in
+  `/opt/litellm/install_logs/` (available since 1.5.3 / build 102).
+- Proxy startup audit records in the proxy logs (available since 1.5.2).
+
+These audit features were introduced after the October 2026 compromise and
+may therefore be unavailable in deployments created with earlier releases.
+
+Where available, shell history may provide additional timeline evidence.
+Commands invoking `install.sh`, `pip install litellm`, container image pulls,
+or other LiteLLM installation and startup actions may help establish whether
+an affected version could have been installed, updated, or executed during
+the relevant time period.
+
+Shell history may be disabled, truncated, manually edited, rotated, or
+recorded without timestamps. It should therefore be treated as supporting
+evidence rather than proof of installation or execution.
 
 ### Forensic investigation and remediation
 

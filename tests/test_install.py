@@ -2,6 +2,7 @@
 """Exercise installer configuration migration and backups without installing."""
 
 from pathlib import Path
+import os
 import subprocess
 import sys
 import tempfile
@@ -18,12 +19,103 @@ RUNTIME_MODULES = INSTALLER.split("RUNTIME_MODULES=(", 1)[1].split("\n)", 1)[0]
 COMMAND_SETUP = INSTALLER.split("# Create symlink for easy access", 1)[1].split(
     "# Check if ~/.local/bin is in PATH", 1
 )[0]
+INSTALL_LOG_SETUP = INSTALLER.split(
+    'echo "=================================="\n'
+    'echo "harinezumigel-llm-stack Installation Script"',
+    1,
+)[0]
+EDITOR_SECTION = INSTALLER.split("open_config_in_editor() {", 1)[1].split(
+    "\nstart_install_log\n", 1
+)[0]
 
 sys.path.insert(0, str(PROJECT_DIR / "src"))
 from fix_settings import link_repository_launcher
 
 
 class TestInstallerConfig(unittest.TestCase):
+    def _run_logged_installer(self, root: Path, body: str) -> tuple[int, str]:
+        script = root / "install.sh"
+        script.write_text(INSTALL_LOG_SETUP + body, encoding="utf-8")
+        result = subprocess.run(
+            ["bash", str(script)],
+            input="yyy",
+            capture_output=True,
+            text=True,
+            cwd=root,
+            check=False,
+            timeout=30,
+        )
+        logs = list((root / "install_logs").glob("install-*.log"))
+        self.assertEqual(len(logs), 1, result.stdout + result.stderr)
+        self.assertEqual(logs[0].stat().st_mode & 0o777, 0o600)
+        self.assertEqual((root / "install_logs").stat().st_mode & 0o777, 0o700)
+        copy = Path("/opt/litellm/install_logs") / logs[0].name
+        copy.unlink(missing_ok=True)
+        return result.returncode, logs[0].read_text(encoding="utf-8")
+
+    def test_install_log_records_answers_but_not_editor_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "cfg").mkdir()
+            (root / "cfg" / "env").write_text("API_KEY=topsecret\n", encoding="utf-8")
+            (root / "cfg" / "config.yaml").write_text(
+                "k: topsecret\n", encoding="utf-8"
+            )
+            editor = root / "editor"
+            editor.write_text('#!/bin/bash\necho "EDITOR SAW: $(cat "$1")"\n')
+            editor.chmod(0o755)
+            status, log = self._run_logged_installer(
+                root,
+                f"RED=''; NC=''; YELLOW=''; TURQUOISE=''; PROMPT_RESET=''\n"
+                f'CONFIG_DIR="{root}/cfg"\nEDITOR="{editor}"\n'
+                'echo "installer output"\necho "installer error" >&2\n'
+                'read -p "Continue? [y/N] " -n 1 -r\necho\n'
+                "open_config_in_editor() {" + EDITOR_SECTION + "\nstart_install_log\n"
+                'echo "after editor"\n',
+            )
+
+        self.assertEqual(status, 0)
+        self.assertIn("installer output", log)
+        self.assertIn("installer error", log)
+        self.assertIn("[answer: y]", log)
+        self.assertIn("[editor prompts and sessions are not logged]", log)
+        self.assertNotIn("topsecret", log)
+        self.assertNotIn("Open env file", log)
+        self.assertIn("after editor", log)
+        self.assertIn("exit status 0 ===", log)
+
+    def test_install_log_is_mandatory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "install_logs").write_text("not a directory\n", encoding="utf-8")
+            script = root / "install.sh"
+            script.write_text(
+                INSTALL_LOG_SETUP + 'echo "SHOULD NOT RUN"\n', encoding="utf-8"
+            )
+            result = subprocess.run(
+                ["bash", str(script)],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+                env={**os.environ, "HLS_INSTALL_NO_LOG": "1"},
+            )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("could not create install log", result.stdout)
+        self.assertNotIn("SHOULD NOT RUN", result.stdout)
+
+    def test_install_log_records_failure_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            status, log = self._run_logged_installer(
+                Path(tmp), 'echo "before"\nfalse\necho "SHOULD NOT RUN"\n'
+            )
+
+        self.assertEqual(status, 1)
+        self.assertIn("before", log)
+        self.assertNotIn("SHOULD NOT RUN", log)
+        self.assertIn("exit status 1 ===", log)
+
     def test_embedded_pyyaml_has_exact_version_and_hashes(self) -> None:
         import re
 
@@ -46,6 +138,26 @@ class TestInstallerConfig(unittest.TestCase):
         self.assertEqual(INSTALLER.count("-r <(pyyaml_requirements)"), 2)
         self.assertNotIn("requirements-launcher.lock", INSTALLER)
         self.assertNotIn("requirements-proxy.lock", INSTALLER)
+
+    def test_embedded_prisma_has_exact_version_and_hash(self) -> None:
+        function = (
+            "prisma_requirements() {"
+            + INSTALLER.split("prisma_requirements() {", 1)[1].split("\n}", 1)[0]
+            + "\n}\n"
+        )
+        result = subprocess.run(
+            ["bash", "-c", function + "prisma_requirements"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            result.stdout,
+            "prisma==0.15.0 \\\n"
+            "    --hash=sha256:"
+            "de949cc94d3d91243615f22ff64490aa6e2d7cb81aabffce53d92bd3977c09a4\n",
+        )
+        self.assertEqual(INSTALLER.count("-r <(prisma_requirements)"), 1)
 
     def test_backend_image_example_is_digest_pinned(self) -> None:
         lines = (

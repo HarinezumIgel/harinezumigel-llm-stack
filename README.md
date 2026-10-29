@@ -144,6 +144,14 @@ The installer copies the launcher and runtime helper modules into
 depend on the checkout location. Rerun the installer to update the installed
 runtime after updating the repository.
 
+### Install logs
+
+Each installer run writes a private log of its output and your `y/N` answers
+to `install_logs/` in the checkout, with a copy in `/opt/litellm/install_logs/`.
+Editor sessions are not logged. View a log with `less -R install_logs/<file>.log`.
+
+### Installed files
+
 The `install` command used below is a standard Linux file-copying tool, not a
 package manager. `install -m 644` copies files with owner read/write and
 everyone else read-only permissions. The launcher is then made executable
@@ -157,8 +165,9 @@ and installs LiteLLM in `/opt/litellm/venv`:
   fallback. It downloads the platform-specific wheel from PyPI's file host,
   verifies its SHA-256 hash, bypasses pip's cache, and requires a successful
   `pip check`. It does not automatically track newer releases.
-- **Other proxy dependencies:** pip resolves packages such as Prisma for the
-  target environment; their versions are not individually hash-pinned.
+- **Prisma:** pins **0.15.0** and verifies its PyPI wheel SHA-256 from the
+  shared `prisma_requirements` definition in [install.sh](install.sh). Pip
+  resolves its transitive dependencies for the target environment.
 - **PyYAML:** pins **6.0.3** and uses the shared `pyyaml_requirements`
   definition in [install.sh](install.sh), with
   `--require-hashes --only-binary=:all:`. The approved hashes cover all
@@ -178,7 +187,7 @@ and installs LiteLLM in `/opt/litellm/venv`:
 
 Add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile if needed.
 
-### LiteLLM version output and startup logs (since 1.5.2)
+### LiteLLM version output and startup logs
 
 The launcher and installer report the installed LiteLLM version:
 
@@ -196,7 +205,7 @@ before execution. Each record contains `litellm_version`, `launcher_version`,
 and a UTC `timestamp`; it records an attempt, not confirmed readiness.
 Dry-runs do not execute the proxy or create a startup record, and reusing an
 already-running proxy does not append one.
-See [startup audit records](security_incidents/litellm-oct-2026.md#proxy-startup-audit-records-since-152)
+See [startup audit records](security_incidents/litellm-oct-2026.md#proxy-startup-audit-records)
 for investigation limitations.
 
 ### Platform compatibility and installation failures
@@ -249,8 +258,10 @@ backing up. Legacy `config/.env`, root-level `env` / `.env`, and root-level
 `config.yaml` are backed up rather than migrated as active configuration; the
 originals remain in place. Review the backups and manually carry over any
 host-specific values into the current examples.
-Replacing an existing virtual environment retains it under
-`/opt/litellm/venv_backup_*/venv`. Declining both reuse and reinstallation aborts.
+With an existing virtual environment, the installer asks only whether to reuse
+it or create a fresh one; the pinned LiteLLM version is installed either way.
+A replaced environment is moved to `/opt/litellm/venv_backup_*/venv` and its
+path is reported at the end. Declining both options aborts setup.
 
 ### Manual alternative
 

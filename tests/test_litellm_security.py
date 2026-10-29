@@ -32,6 +32,9 @@ DEPENDENCY_FUNCTION = (
     "pyyaml_requirements() {"
     + INSTALLER.split("pyyaml_requirements() {", 1)[1].split("\n}", 1)[0]
     + "\n}\n"
+    + "prisma_requirements() {"
+    + INSTALLER.split("prisma_requirements() {", 1)[1].split("\n}", 1)[0]
+    + "\n}\n"
     + "show_platform_hint() {"
     + INSTALLER.split("show_platform_hint() {", 1)[1].split("\n}", 1)[0]
     + "\n}\n"
@@ -102,7 +105,8 @@ class TestLiteLLMSecurity(unittest.TestCase):
             'if [[ "$*" == *" download "* ]]; then\n'
             "  while [[ $# -gt 0 ]]; do\n"
             '    if [[ "$1" == "--dest" ]]; then\n'
-            '      touch "$2/PyYAML-6.0.3-py3-none-any.whl"\n'
+            '      touch "$2/pyyaml-6.0.3-cp312-cp312-manylinux_2_17_x86_64.whl"\n'
+            '      touch "$2/prisma-0.15.0-py3-none-any.whl"\n'
             "      break\n"
             "    fi\n"
             "    shift\n"
@@ -474,9 +478,14 @@ class TestLiteLLMSecurity(unittest.TestCase):
                 self.assertIn("--require-hashes", lines[0])
                 self.assertIn("--no-deps", lines[0])
                 self.assertIn(" install ", lines[1])
-                wheel = lines[1].split("prisma ", 1)[1]
-                self.assertTrue(wheel.endswith("/PyYAML-6.0.3-py3-none-any.whl"))
-                self.assertFalse(Path(wheel).parent.exists())
+                self.assertEqual(lines[0].count("-r /dev/fd/"), 2)
+                self.assertIn("/prisma-0.15.0-py3-none-any.whl", lines[1])
+                self.assertIn(
+                    "/pyyaml-6.0.3-cp312-cp312-manylinux_2_17_x86_64.whl",
+                    lines[1],
+                )
+                wheel_dir = Path(lines[0].split("--dest ", 1)[1].split(" -r ", 1)[0])
+                self.assertFalse(wheel_dir.exists())
                 self.assertIn("check", calls)
                 self.assertFalse(self.sentinel.exists())
                 self.pip_calls.unlink()

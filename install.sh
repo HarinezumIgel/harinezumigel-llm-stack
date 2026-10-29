@@ -4,6 +4,102 @@
 
 set -e
 
+# Color codes for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+TURQUOISE=$'\033[0;36m'
+PROMPT_RESET=$'\033[0m'
+NC='\033[0m' # No Color
+
+# Install log: installer output is tee'd to a private file in install_logs/.
+# Editor prompts and sessions are excluded (stop_install_log) so configuration
+# secrets are not recorded. Hidden input such as sudo passwords never passes
+# through stdout. The log is mandatory: setup aborts if it cannot be created.
+INSTALL_LOG=""
+INSTALL_LOG_ACTIVE=false
+INSTALL_LOG_TEE_PID=""
+
+start_install_log() {
+    [[ -n "$INSTALL_LOG" && $INSTALL_LOG_ACTIVE == false ]] || return 0
+    # tee ignores INT/HUP/TERM so the log still records how an interrupted run ended.
+    exec > >(trap '' INT HUP TERM; exec tee -a --output-error=warn "$INSTALL_LOG") 2>&1
+    INSTALL_LOG_TEE_PID=$!
+    INSTALL_LOG_ACTIVE=true
+}
+
+stop_install_log() {
+    [[ $INSTALL_LOG_ACTIVE == true ]] || return 0
+    exec 1>&3 2>&4
+    wait "$INSTALL_LOG_TEE_PID" 2> /dev/null || true
+    INSTALL_LOG_ACTIVE=false
+}
+
+# Typed answers are echoed by the terminal, not written to stdout, so record
+# prompt answers explicitly while logging is active.
+read() {
+    local status=0
+    builtin read "$@" || status=$?
+    if [[ $INSTALL_LOG_ACTIVE == true && " $* " == *" -p "* ]]; then
+        printf '[answer: %q]' "${REPLY-}" >> "$INSTALL_LOG"
+    fi
+    return "$status"
+}
+
+finish_install_log() {
+    local status=$?
+    [[ -n "$INSTALL_LOG" ]] || return 0
+    stop_install_log
+    printf '\n=== install.sh finished %s, exit status %s ===\n' \
+        "$(date '+%F %T %z')" "$status" >> "$INSTALL_LOG"
+    local copy=""
+    # Keep a copy beside the installation; the checkout copy survives
+    # reinstall procedures that remove /opt/litellm.
+    if [[ -d /opt/litellm && -O /opt/litellm ]]; then
+        if (umask 077 && mkdir -p /opt/litellm/install_logs) \
+            && chmod 700 /opt/litellm/install_logs \
+            && cp -p "$INSTALL_LOG" /opt/litellm/install_logs/; then
+            copy="/opt/litellm/install_logs/$(basename "$INSTALL_LOG")"
+        else
+            echo -e "${YELLOW}Warning: could not copy install log to /opt/litellm/install_logs.${NC}"
+        fi
+    fi
+    echo
+    echo -e "${YELLOW}==================================${NC}"
+    echo -e "${YELLOW}Install log${NC}"
+    echo -e "${YELLOW}==================================${NC}"
+    echo "Written to: $INSTALL_LOG"
+    [[ -n "$copy" ]] && echo "Copy: $copy"
+    echo "View with: less -R \"$INSTALL_LOG\""
+    return "$status"
+}
+
+# Reject root before creating root-owned logs in the checkout.
+if [[ $EUID -eq 0 ]]; then
+    echo -e "${RED}Error: Do not run this script as root${NC}"
+    echo "Run as a regular user. The script will use sudo when needed."
+    exit 1
+fi
+
+install_log_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/install_logs"
+INSTALL_LOG="$install_log_dir/install-$(date +%Y%m%d-%H%M%S).log"
+if ! (umask 077 && mkdir -p "$install_log_dir" && chmod 700 "$install_log_dir" \
+    && : > "$INSTALL_LOG"); then
+    echo -e "${RED}Error: could not create install log in $install_log_dir; aborting.${NC}"
+    exit 1
+fi
+exec 3>&1 4>&2
+trap finish_install_log EXIT
+trap 'echo; echo "Interrupted (SIGINT)"; exit 130' INT
+trap 'echo; echo "Terminated (SIGTERM)"; exit 143' TERM
+trap 'echo; echo "Hangup (SIGHUP)"; exit 129' HUP
+start_install_log
+echo "Install log: $INSTALL_LOG"
+echo "Started: $(date '+%F %T %z') by $(id -un) on $(hostname)"
+echo "Repository: $(git -C "$(dirname "$install_log_dir")" describe --always --dirty 2> /dev/null || echo unknown)"
+echo "Arguments: ${*:-none}"
+echo
+
 echo "=================================="
 echo "harinezumigel-llm-stack Installation Script"
 echo "=================================="
@@ -20,14 +116,6 @@ echo
 echo "Validated target: Linux/glibc arm64 and amd64. Other hosts may need compatible"
 echo "PyYAML/LiteLLM artifacts and an NVIDIA vLLM image; see README.md."
 echo
-
-# Color codes for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-TURQUOISE=$'\033[0;36m'
-PROMPT_RESET=$'\033[0m'
-NC='\033[0m' # No Color
 
 pyyaml_requirements() {
     # PyPI non-yanked wheel SHA-256s retrieved 2026-10-28; review updates as a set.
@@ -108,6 +196,14 @@ pyyaml==6.0.3 \
 PYYAML_REQUIREMENTS
 }
 
+prisma_requirements() {
+    # PyPI wheel SHA-256 retrieved 2026-10-29; review updates as a set.
+    cat <<'PRISMA_REQUIREMENTS'
+prisma==0.15.0 \
+    --hash=sha256:de949cc94d3d91243615f22ff64490aa6e2d7cb81aabffce53d92bd3977c09a4
+PRISMA_REQUIREMENTS
+}
+
 show_platform_hint() {
     echo "Platform compatibility: this setup was validated on Linux/glibc arm64 and amd64."
     echo "A successful download does not guarantee installation or runtime compatibility."
@@ -146,13 +242,6 @@ for config_file in env.example config.yaml.example; do
         exit 1
     fi
 done
-
-# Check if running as root
-if [[ $EUID -eq 0 ]]; then
-   echo -e "${RED}Error: Do not run this script as root${NC}"
-   echo "Run as a regular user. The script will use sudo when needed."
-   exit 1
-fi
 
 # Check prerequisites
 echo "=================================="
@@ -354,7 +443,7 @@ backup_config() {
 }
 
 report_config_backups() {
-    echo "Previous configuration backups:"
+    echo -e "${YELLOW}Previous configuration backups:${NC}"
     if [[ ${#CONFIG_BACKUPS[@]} -eq 0 ]]; then
         echo "  None; no existing configuration files needed backing up."
         return
@@ -393,7 +482,7 @@ if [[ -s "$SCRIPT_DIR/config/env.example" ]]; then
         echo "  → You must edit this file with your paths and API keys"
         echo "  → IMPORTANT: Set VLLM_DOCKER_IMAGE to a tag that matches your NVIDIA driver"
         echo "  → Check with: nvidia-smi (Driver Version), then see README.md"
-        echo "  → Run: ${YELLOW}nano $CONFIG_DIR/env${NC} (or your preferred editor)"
+        echo -e "  → Run: ${YELLOW}nano $CONFIG_DIR/env${NC} (or your preferred editor)"
     else
         echo "  Skipping env."
     fi
@@ -418,7 +507,7 @@ if [[ -s "$SCRIPT_DIR/config/config.yaml.example" ]]; then
         cp "$SCRIPT_DIR/config/config.yaml.example" "$CONFIG_DIR/config.yaml"
         echo -e "${GREEN}✓${NC} Created $CONFIG_DIR/config.yaml"
         echo "  → You must edit this file to configure your models"
-        echo "  → Run: ${YELLOW}nano $CONFIG_DIR/config.yaml${NC} (or your preferred editor)"
+        echo -e "  → Run: ${YELLOW}nano $CONFIG_DIR/config.yaml${NC} (or your preferred editor)"
     else
         echo "  Skipping config.yaml."
     fi
@@ -497,6 +586,8 @@ install_litellm_proxy_deps() (
     local installed_version
     local wheel_dir
     local -a yaml_wheels
+    local -a prisma_wheels
+    local -a downloaded_wheels
     local security_check="$SCRIPT_DIR/src/hls_litellm_security.py"
 
     if ! installed_version=$(python3 -I -S "$security_check" check "$venv_path" --allow-missing); then
@@ -514,21 +605,27 @@ install_litellm_proxy_deps() (
         return 1
     fi
     trap 'rm -f -- "$wheel_dir"/*.whl; rmdir -- "$wheel_dir"' EXIT
-    echo "Downloading PyYAML with predefined SHA-256 verification before installation."
+    echo "Downloading hash-pinned PyYAML and Prisma before installation."
     if ! "$pip_bin" --isolated download --no-cache-dir --no-deps \
         --require-hashes --only-binary=:all: --index-url https://pypi.org/simple \
-        --dest "$wheel_dir" -r <(pyyaml_requirements); then
+        --dest "$wheel_dir" -r <(pyyaml_requirements) \
+        -r <(prisma_requirements); then
         show_platform_hint
         return 1
     fi
-    yaml_wheels=("$wheel_dir"/*.whl)
-    if [[ ${#yaml_wheels[@]} -ne 1 || ! -f "${yaml_wheels[0]}" ]]; then
-        echo -e "${RED}✗${NC} Expected exactly one hash-verified PyYAML wheel"
+    yaml_wheels=("$wheel_dir"/pyyaml-6.0.3-*.whl)
+    prisma_wheels=("$wheel_dir"/prisma-0.15.0-py3-none-any.whl)
+    downloaded_wheels=("$wheel_dir"/*.whl)
+    if [[ ${#yaml_wheels[@]} -ne 1 || ! -f "${yaml_wheels[0]}" ||
+        ${#prisma_wheels[@]} -ne 1 || ! -f "${prisma_wheels[0]}" ||
+        ${#downloaded_wheels[@]} -ne 2 ]]; then
+        echo -e "${RED}✗${NC} Expected one hash-verified PyYAML and Prisma wheel"
         return 1
     fi
-    echo "Installing hash-verified LiteLLM and PyYAML with platform-resolved dependencies."
+    echo "Installing hash-verified LiteLLM, PyYAML, and Prisma with platform-resolved dependencies."
     if ! "$pip_bin" --isolated install --no-cache-dir --upgrade --force-reinstall \
-        --index-url https://pypi.org/simple "$requirement" prisma "${yaml_wheels[0]}"; then
+        --index-url https://pypi.org/simple "$requirement" \
+        "${prisma_wheels[0]}" "${yaml_wheels[0]}"; then
         show_platform_hint
         return 1
     fi
@@ -551,16 +648,18 @@ install_litellm_proxy_deps() (
 )
 
 CREATE_VENV=false
+VENV_BACKUP=""
 if [[ -d "$VENV_PATH" ]]; then
     echo
     echo -e "${GREEN}✓${NC} Found existing virtual environment at $VENV_PATH"
     echo
-    echo "This step will:"
-    echo "  • Use the existing virtual environment"
-    echo "  • Install/reinstall the pinned, hash-verified litellm[proxy] version (this may take a few minutes)"
-    echo "  • Configure the env file with the venv activation path"
+    echo "The pinned, hash-verified litellm[proxy] version is installed in either case"
+    echo "(this may take a few minutes), and env is updated with the venv paths."
+    echo "Choose only which virtual environment to install into:"
+    echo "  y = reuse the existing environment"
+    echo "  N = create a fresh environment; the existing one is moved to a backup"
     echo
-    read -p "${TURQUOISE}Use existing virtual environment and install the pinned LiteLLM version? [y/N] ${PROMPT_RESET}" -n 1 -r
+    read -p "${TURQUOISE}Reuse the existing virtual environment? [y/N] ${PROMPT_RESET}" -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         echo
@@ -574,8 +673,8 @@ if [[ -d "$VENV_PATH" ]]; then
             exit 1
         fi
     else
-        echo "Reinstalling will replace $VENV_PATH; the old environment will be retained."
-        read -p "${TURQUOISE}Reinstall the LiteLLM virtual environment? [y/N] (No aborts setup) ${PROMPT_RESET}" -n 1 -r
+        echo "A fresh environment replaces $VENV_PATH; the existing one is moved to a backup."
+        read -p "${TURQUOISE}Create a fresh virtual environment? [y/N] (No aborts setup) ${PROMPT_RESET}" -n 1 -r
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
             echo "Aborted. The existing virtual environment remains unchanged."
@@ -712,6 +811,12 @@ open_config_in_editor() {
     fi
 }
 
+# Editor prompts and sessions may show secrets; keep them out of the install log.
+if [[ $INSTALL_LOG_ACTIVE == true ]]; then
+    echo "[editor prompts and sessions are not logged]"
+    stop_install_log
+fi
+
 # Offer to open editor
 echo "Would you like to edit the configuration files now?"
 echo -e "${YELLOW}⚠ Note: the next file is config/env (no leading dot), not venv or .venv.${NC}"
@@ -729,6 +834,8 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
     open_config_in_editor "$CONFIG_DIR/config.yaml"
 fi
 
+start_install_log
+
 echo
 if [[ ! -s "$CONFIG_DIR/env" || ! -s "$CONFIG_DIR/config.yaml" ]]; then
     echo -e "${RED}Error: Configuration files are missing or empty. Setup is incomplete.${NC}"
@@ -742,3 +849,9 @@ echo -e "${RED}Did you replace the example LITELLM_BIND_HOST=192.168.100.50 in $
 echo -e "${RED}Did you configure $CONFIG_DIR/config.yaml for your models?${NC}"
 echo
 report_config_backups
+if [[ -n "${VENV_BACKUP:-}" ]]; then
+    echo
+    echo -e "${YELLOW}Previous virtual environment backup:${NC}"
+    echo "  $VENV_BACKUP/venv"
+    echo "  Delete it once the new environment works: rm -rf \"$VENV_BACKUP\""
+fi

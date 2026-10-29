@@ -44,6 +44,7 @@ config.yaml
 
 # Logs
 *.log
+/install_logs/
 
 # Test files
 .pytest_cache/
@@ -63,4 +64,6 @@ deploy.py
 /src/fix_settings.py
 /src/check_all_models.py
 /tests/test_check_all_models.py
+/src/check_network_iocs.py
+/tests/test_network_iocs.py
 /TUNING.md

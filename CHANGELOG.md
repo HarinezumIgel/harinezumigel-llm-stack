@@ -5,7 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [29/10/2026]
+## [10/29/2026 Revision 102]
+
+### Added
+- Mandatory install logs: every `install.sh` run writes its output and each
+  `y/N` answer to `install_logs/install-YYYYmmdd-HHMMSS.log` in the checkout
+  (directory mode 700, file mode 600, ignored by git). Each log records start
+  time, user, host, repository commit, arguments, and the finish time with exit
+  status, including Ctrl+C, SIGTERM, and hangup. Setup aborts if the log cannot
+  be created.
+- Exclude the final editor prompts and editor sessions from install logs, so
+  configuration secrets viewed or typed there are not logged.
+- Copy the finished install log to `/opt/litellm/install_logs/` when
+  `/opt/litellm` exists and is owned by the installing user.
+- Report the path of a replaced virtual environment backup
+  (`/opt/litellm/venv_backup_*/venv`) after the configuration backups at the
+  end of setup.
+- Regression tests for install logging and the Prisma hash pin.
+
+### Changed
+- Reword the existing virtual environment prompts: the pinned LiteLLM version is
+  installed either way; the choice is only between reusing the environment and
+  creating a fresh one.
+- Identify the launcher as 1.5.3/102 in output and startup audit records.
+- Document install logs and list them with proxy startup audit records as
+  project-specific audit evidence in the October incident document.
+
+### Fixed
+- The `nano` hints after copying `env` and `config.yaml` printed raw color escape
+  codes instead of colored text.
+
+### Security
+- Hash-pin Prisma 0.15.0 (LiteLLM 1.106.2 requires `prisma>=0.11.0,<1.0`).
+  The installer downloads the Prisma and PyYAML wheels with `--require-hashes`
+  before installing, then installs those verified wheels with the hash-pinned
+  LiteLLM wheel. Prisma's own dependencies are still resolved per host and are
+  not hash-pinned.
+
+## [29/10/2026 Revsion 96]
 
 ### Added
 - Append the checked LiteLLM package version, launcher version, and UTC timestamp
