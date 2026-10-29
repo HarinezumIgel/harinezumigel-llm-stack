@@ -112,41 +112,25 @@ environments inheriting system site-packages are rejected. Unaffected existing
 versions remain usable by the launcher; only the installer enforces the pin.
 These checks do not prove an existing environment or running process is clean.
 
-### Other evidence to investigate
+### Forensic investigation and remediation
 
-- `/tmp/remote_code_loader.lock` and a detached Python process holding it,
-  even after reinstalling the package. Inspect without executing Python.
-- `litellm-1.107.0.dist-info` in retained environments, cached artifacts, and images.
-- Historical DNS/proxy/firewall logs, using the October payload indicators
-  from [BerriAI/litellm#47826](https://github.com/BerriAI/litellm/issues/47826).
-  Do not contact suspected exfiltration or command-and-control destinations.
-- The canonical investigation lists `69.48.229.143` and `199.91.221.39`
-  as attacker source IPs used against upstream infrastructure. These are
-  not documented there as customer malware exfiltration destinations.
-- On AWS, CloudTrail `GetCallerIdentity` calls around installation and
-  subsequent use of the role's credentials outside your infrastructure.
+This document focuses on project-specific protections, audit records,
+version checks, and installation behavior.
 
-Missing files, no current network connections, or no retained logs cannot
-exclude earlier exfiltration. The March metadata IP `169.254.169.254` and
-March domains are not a complete October detection checklist.
+For indicators of compromise (IOCs), forensic investigation procedures,
+network indicators, host analysis, credential-exposure assessment,
+incident response, and remediation guidance, consult the upstream
+resources:
 
-### If a compromised version or indicator is detected
+- LiteLLM October 2026 incident advisory
+- LiteLLM October 2026 canonical investigation
 
-1. Do not activate the environment or run its Python, pip, or LiteLLM.
-   The October `cook.pth` and `sitecustomize.py` hooks can execute at Python
-   startup without importing LiteLLM. Run inspection tools only from a trusted
-   interpreter/environment.
-2. Stop affected services, isolate the host, and investigate for persistence.
-   Preserve evidence when needed for incident response.
-3. From a clean machine, rotate all potentially exposed API keys, SSH keys,
-   cloud credentials and instance/task IAM roles, database passwords (including
-   `DATABASE_URL`), Kubernetes tokens, and other secrets. Include every provider
-   key in the proxy database, LiteLLM master and virtual keys, and secrets
-   reachable through other host processes.
-4. Rebuild the environment on a trusted host and rerun the installer.
-   Do not simply upgrade or reactivate a retained environment backup:
-   replacing the package does not undo credential theft or host compromise.
+The upstream incident documentation is the authoritative source for
+investigation and recovery guidance and may be updated as new information
+becomes available.
 
-The installer intentionally aborts rather than running pip inside a compromised
-environment. It does not automatically delete evidence, stop services, or rotate
-credentials.
+The protections implemented by harinezumigel-llm-stack are intended to
+help prevent installation or reuse of known-compromised LiteLLM releases
+and to provide additional audit information. They do not constitute a
+complete forensic assessment of a host, environment, container image,
+or deployment.
