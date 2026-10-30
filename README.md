@@ -93,6 +93,12 @@ Client (Copilot, RAG app, ...)
 +---------------------------------------------------------+
 ```
 
+[SECURITY.md](SECURITY.md) explains why this setup was chosen.
+> ❗ **Important**
+>
+> Read [Critical Security Note on Docker & UFW](SECURITY.md#critical-security-note-on-docker--ufw)
+> for instructions on how to restrict access.
+
 The CLI is the control tool, not part of the inference request path. LiteLLM
 routes requests to the selected backend model; it does not automatically run a
 guard/inference/judge pipeline. That orchestration belongs to the client app.
