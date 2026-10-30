@@ -76,7 +76,7 @@ Since vLLM stays bound to `127.0.0.1`, you only need to manage firewall access f
 >
 > Docker still creates its normal `iptables` rules, but because the published ports are bound only to `127.0.0.1`, they are accessible only from the local host and are not exposed on external network interfaces.
 >
-> Always ensure `VLLM_BIND_HOST` is explicitly set to `127.0.0.1` when containerizing backend models that should remain locally accessible only.
+> Always ensure `VLLM_BIND_HOST` is explicitly set to `127.0.0.1` when containerizing backend models that should remain locally accessible only. For this deployment, where LiteLLM and vLLM run on the same host, `VLLM_HOST` is also intentionally set to `127.0.0.1`. `VLLM_BIND_HOST` restricts Docker port publication to the loopback interface, while `VLLM_HOST` ensures LiteLLM connects to the backend models through that same local interface. Changing one without considering the other may break backend connectivity or unintentionally alter the network exposure model.
 
 > After deployment, verify with `docker ps` that all published ports appear as `127.0.0.1:<port>` rather than `0.0.0.0:<port>` or `<host-ip>:<port>`.
 
