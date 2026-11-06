@@ -571,6 +571,15 @@ A parser nested in `reasoning_config` is moved to `--reasoning-parser`;
 conflicting parsers and legacy `enable_reasoning` / `enable_thinking` keys
 there are rejected.
 
+The example config enables n-gram speculative decoding for LLMs without a
+model-specific speculative setup (five draft tokens, prompt lookup lengths 2–4).
+Embedding and reranking models do not use speculative decoding; existing MTP
+and DFlash profiles are preserved. `model_info.speculative_config` is forwarded
+as JSON to `--speculative-config`. Set it to `null` to disable forwarding.
+After recreating a container, check the vLLM engine startup log for a non-`None`
+`speculative_config`; support and performance depend on the selected vLLM image
+and workload.
+
 Set backend generation defaults in `model_info.override_generation_config`,
 a YAML mapping forwarded as JSON to vLLM's `--override-generation-config`:
 
@@ -768,6 +777,35 @@ port, so similarly prefixed model names are not included in its logs or stops.
 | Follow proxy logs | `harinezumigel-llm-stack litellm --show-log --follow` |
 | Locate Docker and proxy logs | `harinezumigel-llm-stack all --show-log-path` |
 | Clean proxy log files | `harinezumigel-llm-stack litellm --clean-log` |
+
+`--help` and missing-action errors list every CLI option directly from the
+argument parser, including log paths, cleanup, status, and startup modifiers.
+
+### Check all configured models
+
+Use the model checker to make sequential API smoke tests through the local
+LiteLLM proxy:
+
+```bash
+# Preview eligible model checks without starting containers or making requests.
+python src/test_configured_models.py --preview
+
+# Test every configured model.
+python src/test_configured_models.py
+
+# Test selected models by configured name or alias.
+python src/test_configured_models.py --models guard bge-m3-embedder
+```
+
+The checker requires `LITELLM_MASTER_KEY` for actual tests. It stops LiteLLM and
+all configured model backends before testing, starts the proxy and each selected
+model in turn, and stops them when finished. Use `--startup-timeout SECONDS` to
+set the startup deadline (default 1800) or `--max-tokens COUNT` to change the
+maximum generated tokens (default 1024).
+
+Add `--recreate` to rebuild each selected model before testing; the checker
+prompts for confirmation. Recreation deletes container-local data. The warning
+is shown in red on terminals that support color.
 
 `--stream-log` is shorthand for `--show-log --follow`; do not combine them.
 Single-model starts without log streaming print a reminder to add `--stream-log`,

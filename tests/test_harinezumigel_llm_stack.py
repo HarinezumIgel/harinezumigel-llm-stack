@@ -659,6 +659,48 @@ class TestLLMStackInit(unittest.TestCase):
                 (config.vllm_host, 8011),
             )
 
+    def test_example_speculative_configs_are_forwarded_only_for_llms(self):
+        with patch.dict(os.environ, clear=True):
+            harinezumigel_llm_stack.load_env_file(
+                str(PROJECT_DIR / "config" / "env.example")
+            )
+            config = replace(
+                harinezumigel_llm_stack.AppConfig.from_env(),
+                litellm_config=str(PROJECT_DIR / "config" / "config.yaml.example"),
+            )
+            stack = harinezumigel_llm_stack.LLMStack(config)
+            stack.load_models()
+            expected_ngram = {
+                "method": "ngram",
+                "num_speculative_tokens": 5,
+                "prompt_lookup_max": 4,
+                "prompt_lookup_min": 2,
+            }
+            for model in stack.models.values():
+                with self.subTest(model=model.name):
+                    runtime = stack._resolve_runtime_settings(model)
+                    command = stack._build_vllm_command(
+                        model,
+                        Path("/models") / model.model_info["model_dir"],
+                        model.api_base_port,
+                        runtime,
+                    )
+                    if model.model_info.get("mode") in ("embedding", "rerank"):
+                        self.assertNotIn("speculative_config", model.model_info)
+                        self.assertNotIn("--speculative-config", command)
+                        continue
+                    speculative = model.model_info["speculative_config"]
+                    if model.name not in (
+                        "qwen3.8-27B",
+                        "qwen3-coder-30b-a3b-instruct",
+                    ):
+                        self.assertEqual(speculative, expected_ngram)
+                    self.assertEqual(command.count("--speculative-config"), 1)
+                    self.assertEqual(
+                        json.loads(command[command.index("--speculative-config") + 1]),
+                        speculative,
+                    )
+
     def test_standalone_coding_profiles_preserve_native_precision_and_context(self):
         with patch.dict(os.environ, clear=True):
             harinezumigel_llm_stack.load_env_file(
@@ -2117,10 +2159,10 @@ class TestSafetyGuards(unittest.TestCase):
                 recreate=True,
                 no_reuse_existing=False,
                 dry_run=False,
-                show_log=False,
+                show_log=True,
                 show_log_path=False,
                 clean_log=False,
-                follow=False,
+                follow=True,
                 tail="200",
                 ps=False,
                 list=False,
@@ -2135,8 +2177,12 @@ class TestSafetyGuards(unittest.TestCase):
                 dtype=None,
             )
 
-            with self.assertRaises(SystemExit):
+            output = io.StringIO()
+            with redirect_stdout(output), self.assertRaises(SystemExit) as error:
                 stack.run(args)
+
+            self.assertEqual(error.exception.code, 1)
+            self.assertIn("--recreate requires --start", output.getvalue())
         finally:
             safe_unlink(temp_config)
 
@@ -2975,6 +3021,31 @@ class TestCLIProgramName(unittest.TestCase):
 
 class TestCLIParseArgs(unittest.TestCase):
     """Test CLI argument parsing behavior."""
+
+    def test_litellm_missing_action_lists_stream_log(self) -> None:
+        """The LiteLLM action error should list --stream-log as a valid action."""
+        import argparse
+
+        from harinezumigel_llm_stack import LLMStack  # type: ignore
+
+        stack = LLMStack(harinezumigel_llm_stack.APP)
+        args = argparse.Namespace(
+            model="litellm",
+            recreate=False,
+            start=False,
+            stop=False,
+            show_log=False,
+            follow=False,
+            clean_log=False,
+            show_log_path=False,
+        )
+        output = io.StringIO()
+
+        with redirect_stdout(output), self.assertRaises(SystemExit) as error:
+            stack.run(args)
+
+        self.assertEqual(error.exception.code, 1)
+        self.assertIn("--stream-log", output.getvalue())
 
     def test_stream_log_sets_show_log_and_follow(self) -> None:
         """--stream-log should normalize to --show-log + --follow."""

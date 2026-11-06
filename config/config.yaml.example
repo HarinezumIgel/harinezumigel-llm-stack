@@ -54,12 +54,16 @@ model_list:
   # RAG embeddings and reranking
   # Provider model names match --served-model-name, not local directory names.
   # ---------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
+  # model: bge-m3  alias: bge-m3-embedder
+  # ---------------------------------------------------------------------------
   - model_name: bge-m3
     litellm_params:
       model: hosted_vllm/bge-m3
       api_base: os.environ/BGE_M3_API_BASE
       api_key: os.environ/LOCAL_VLLM_API_KEY
       request_timeout: 240
+      num_retries: 0
     rebuild: true
     model_info:
       mode: embedding
@@ -80,12 +84,16 @@ model_list:
       upstream: "https://huggingface.co/BAAI/bge-m3"
       license: "See upstream model license"
 
+  # ---------------------------------------------------------------------------
+  # model: bge-reranker-v2-m3  alias: bge-reranker
+  # ---------------------------------------------------------------------------
   - model_name: bge-reranker-v2-m3
     litellm_params:
       model: hosted_vllm/bge-reranker-v2-m3
       api_base: os.environ/BGE_RERANKER_V2_M3_API_BASE
       api_key: os.environ/LOCAL_VLLM_API_KEY
       request_timeout: 240
+      num_retries: 0
     rebuild: true
     model_info:
       mode: rerank
@@ -106,12 +114,16 @@ model_list:
       upstream: "https://huggingface.co/BAAI/bge-reranker-v2-m3"
       license: "See upstream model license"
 
+  # ---------------------------------------------------------------------------
+  # model: Snowflake/snowflake-arctic-embed-l-v2.0  alias: snowflake-embedder
+  # ---------------------------------------------------------------------------
   - model_name: Snowflake/snowflake-arctic-embed-l-v2.0
     litellm_params:
       model: hosted_vllm/Snowflake/snowflake-arctic-embed-l-v2.0
       api_base: os.environ/SNOWFLAKE_ARCTIC_EMBED_API_BASE
       api_key: os.environ/LOCAL_VLLM_API_KEY
       request_timeout: 240
+      num_retries: 0
     rebuild: true
     model_info:
       mode: embedding
@@ -132,12 +144,16 @@ model_list:
       upstream: "https://huggingface.co/Snowflake/snowflake-arctic-embed-l-v2.0"
       license: "See upstream model license"
 
+  # ---------------------------------------------------------------------------
+  # model: cross-encoder/mmarco-mMiniLMv2-L12-H384-v1  alias: mmarco-reranker
+  # ---------------------------------------------------------------------------
   - model_name: cross-encoder/mmarco-mMiniLMv2-L12-H384-v1
     litellm_params:
       model: hosted_vllm/cross-encoder/mmarco-mMiniLMv2-L12-H384-v1
       api_base: os.environ/MMARCO_MINILM_API_BASE
       api_key: os.environ/LOCAL_VLLM_API_KEY
       request_timeout: 240
+      num_retries: 0
     rebuild: true
     model_info:
       mode: rerank
@@ -161,13 +177,17 @@ model_list:
   # ---------------------------------------------------------------------------
   # Safety / moderation
   # ---------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
+  # model: llama_guard3_8b  alias: guard
+  # ---------------------------------------------------------------------------
   - model_name: llama_guard3_8b
     litellm_params:
       litellm_provider: openai
       model: openai/llama_guard3_8b
       api_base: os.environ/LLAMA_GUARD3_8B_API_BASE
       api_key: os.environ/LOCAL_VLLM_API_KEY
-      request_timeout: 14400
+      request_timeout: 600
+      num_retries: 0
     rebuild: true
     model_info:
       mode: inference
@@ -185,8 +205,13 @@ model_list:
       enforce_eager: true
       ipc: host
       dtype: auto
-      max_num_seqs: 1
+      max_num_seqs: 4
       max_num_batched_tokens: 512
+      speculative_config:
+        method: ngram
+        num_speculative_tokens: 5
+        prompt_lookup_max: 4
+        prompt_lookup_min: 2
       cache_creation_input_token_cost: 0
       cache_read_input_token_cost: 0
       input_cost_per_token: 0
@@ -198,7 +223,7 @@ model_list:
       upstream: "https://huggingface.co/meta-llama/Llama-Guard-3-8B"
 
   # ---------------------------------------------------------------------------
-  # Fast general-purpose model
+  # model: llama_3_1_8b  alias: llama
   # ---------------------------------------------------------------------------
   - model_name: llama_3_1_8b
     litellm_params:
@@ -206,7 +231,8 @@ model_list:
       model: openai/llama_3_1_8b
       api_base: os.environ/LLAMA_3_1_8B_API_BASE
       api_key: os.environ/LOCAL_VLLM_API_KEY
-      request_timeout: 90
+      request_timeout: 600
+      num_retries: 0
     rebuild: true
     model_info:
       mode: inference
@@ -225,6 +251,11 @@ model_list:
       max_num_seqs: 8
       max_num_batched_tokens: 16384
       enable_prefix_caching: true
+      speculative_config:
+        method: ngram
+        num_speculative_tokens: 5
+        prompt_lookup_max: 4
+        prompt_lookup_min: 2
       compilation_config:
         mode: VLLM_COMPILE
       structured_outputs_config:
@@ -240,7 +271,7 @@ model_list:
       upstream: "https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct"
 
   # ---------------------------------------------------------------------------
-  # Fast lightweight fallback
+  # model: mistral_7b  alias: mistral
   # ---------------------------------------------------------------------------
   - model_name: mistral_7b
     litellm_params:
@@ -248,7 +279,8 @@ model_list:
       model: openai/mistral_7b
       api_base: os.environ/MISTRAL_7B_API_BASE
       api_key: os.environ/LOCAL_VLLM_API_KEY
-      request_timeout: 90
+      request_timeout: 600
+      num_retries: 0
     rebuild: true
     model_info:
       mode: inference
@@ -267,7 +299,11 @@ model_list:
       dtype: auto
       max_num_seqs: 1
       max_num_batched_tokens: 4096
-      speculative_config: null
+      speculative_config:
+        method: ngram
+        num_speculative_tokens: 5
+        prompt_lookup_max: 4
+        prompt_lookup_min: 2
       enable_prefix_caching: true
       cache_creation_input_token_cost: 0
       cache_read_input_token_cost: 0
@@ -280,7 +316,7 @@ model_list:
       upstream: "https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3"
 
   # ---------------------------------------------------------------------------
-  # Qwen2.5 32B AWQ
+  # model: qwen2_5_32b_awq  alias: qwen32
   # ---------------------------------------------------------------------------
   - model_name: qwen2_5_32b_awq
     litellm_params:
@@ -288,7 +324,8 @@ model_list:
       model: openai/qwen2_5_32b_awq
       api_base: os.environ/QWEN2_5_32B_AWQ_API_BASE
       api_key: os.environ/LOCAL_VLLM_API_KEY
-      request_timeout: 180
+      request_timeout: 600
+      num_retries: 0
     rebuild: true
     model_info:
       mode: inference
@@ -304,6 +341,11 @@ model_list:
       max_num_batched_tokens: 16384
       quantization: null
       kv_cache_dtype: auto
+      speculative_config:
+        method: ngram
+        num_speculative_tokens: 5
+        prompt_lookup_max: 4
+        prompt_lookup_min: 2
       enable_prefix_caching: true
       attention_backend: flashinfer
       generation_config: vllm
@@ -322,7 +364,7 @@ model_list:
       upstream: "https://huggingface.co/Qwen/Qwen2.5-32B-Instruct-AWQ"
 
   # ---------------------------------------------------------------------------
-  # Qwen3-Coder-Next AWQ: BIG CONTEXT profile
+  # model: Qwen3-Coder-Next-AWQ  alias: coder
   # ---------------------------------------------------------------------------
   - model_name: Qwen3-Coder-Next-AWQ
     litellm_params:
@@ -330,7 +372,8 @@ model_list:
       model: openai/Qwen3-Coder-Next-AWQ
       api_base: os.environ/QWEN3_CODER_3_NEXT_API_BASE
       api_key: os.environ/LOCAL_VLLM_API_KEY
-      request_timeout: 240
+      request_timeout: 600
+      num_retries: 0
     rebuild: true
     model_info:
       mode: inference
@@ -346,6 +389,11 @@ model_list:
       max_num_batched_tokens: 8192
       quantization: compressed-tensors
       kv_cache_dtype: fp8
+      speculative_config:
+        method: ngram
+        num_speculative_tokens: 5
+        prompt_lookup_max: 4
+        prompt_lookup_min: 2
       enforce_eager: false
       enable_prefix_caching: true
       attention_backend: flashinfer
@@ -368,7 +416,7 @@ model_list:
       upstream: "https://huggingface.co/Qwen/Qwen3-Coder-Next"
 
   # ---------------------------------------------------------------------------
-  # qwen3.6-27b Standard coding / chat model
+  # model: qwen3.6-27b  alias: chat
   # ---------------------------------------------------------------------------
   - model_name: qwen3.6-27b
     litellm_params:
@@ -376,7 +424,8 @@ model_list:
       model: openai/qwen3.6-27b
       api_base: os.environ/QWEN_3_6_27B_API_BASE
       api_key: os.environ/LOCAL_VLLM_API_KEY
-      request_timeout: 240
+      request_timeout: 600
+      num_retries: 0
     rebuild: true
     model_info:
       mode: inference
@@ -392,6 +441,11 @@ model_list:
       max_num_batched_tokens: 32768
       quantization: null
       kv_cache_dtype: fp8
+      speculative_config:
+        method: ngram
+        num_speculative_tokens: 5
+        prompt_lookup_max: 4
+        prompt_lookup_min: 2
       enforce_eager: false
       enable_prefix_caching: true
       attention_backend: flashinfer
@@ -414,7 +468,7 @@ model_list:
       upstream: "https://huggingface.co/Qwen/Qwen3.6-27B"
 
   # ---------------------------------------------------------------------------
-  # DeepSeek-Coder 6.7B RAG / fast tasks
+  # model: deepseek-coder-6.7b-instruct  alias: fast-coder
   # ---------------------------------------------------------------------------
   - model_name: deepseek-coder-6.7b-instruct
     litellm_params:
@@ -422,7 +476,8 @@ model_list:
       model: openai/deepseek-coder-6.7b-instruct
       api_base: os.environ/DEEPSEEK_CODER_6_7B_API_BASE
       api_key: os.environ/LOCAL_VLLM_API_KEY
-      request_timeout: 120
+      request_timeout: 600
+      num_retries: 0
     rebuild: true
     model_info:
       mode: inference
@@ -437,6 +492,11 @@ model_list:
       max_num_seqs: 8
       max_num_batched_tokens: 16384
       enforce_eager: false
+      speculative_config:
+        method: ngram
+        num_speculative_tokens: 5
+        prompt_lookup_max: 4
+        prompt_lookup_min: 2
       enable_prefix_caching: true
       attention_backend: flashinfer
       generation_config: vllm
@@ -454,17 +514,17 @@ model_list:
       license: "See upstream model license"
       upstream: "https://huggingface.co/deepseek-ai/deepseek-coder-6.7b-instruct"
 
-# ---------------------------------------------------------------------------
-# Qwen2.5-1.5B-Instruct
-# Small Judge / Evaluation Model
-# ---------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
+  # model: qwen2_5_1_5b_instruct  alias: judge_small
+  # ---------------------------------------------------------------------------
   - model_name: qwen2_5_1_5b_instruct
     litellm_params:
       litellm_provider: openai
       model: openai/qwen2_5_1_5b_instruct
       api_base: os.environ/QWEN2_5_1_5B_INSTRUCT_API_BASE
       api_key: os.environ/LOCAL_VLLM_API_KEY
-      request_timeout: 120
+      request_timeout: 600
+      num_retries: 0
 
     rebuild: true
 
@@ -494,7 +554,11 @@ model_list:
       quantization: null
       kv_cache_dtype: auto
 
-      speculative_config: null
+      speculative_config:
+        method: ngram
+        num_speculative_tokens: 5
+        prompt_lookup_max: 4
+        prompt_lookup_min: 2
 
       enable_prefix_caching: true
 
@@ -513,10 +577,9 @@ model_list:
       upstream: "Qwen"
 
 
-# ---------------------------------------------------------------------------
-# Qwen2.5-14B-Instruct
-# Judge / Evaluation Model
-# ---------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
+  # model: qwen2_5_14b_instruct  alias: judge
+  # ---------------------------------------------------------------------------
   - model_name: qwen2_5_14b_instruct
 
     litellm_params:
@@ -524,7 +587,8 @@ model_list:
       model: openai/qwen2_5_14b_instruct
       api_base: os.environ/QWEN2_5_14B_INSTRUCT_API_BASE
       api_key: os.environ/LOCAL_VLLM_API_KEY
-      request_timeout: 180
+      request_timeout: 600
+      num_retries: 0
 
     rebuild: true
 
@@ -560,8 +624,11 @@ model_list:
 
       kv_cache_dtype: auto
 
-      # Keep it simple first
-      speculative_config: null
+      speculative_config:
+        method: ngram
+        num_speculative_tokens: 5
+        prompt_lookup_max: 4
+        prompt_lookup_min: 2
 
       enable_prefix_caching: true
 
@@ -585,9 +652,8 @@ model_list:
       upstream: "Qwen"
 
   # ---------------------------------------------------------------------------
-  # Qwen3.5-122B-A10B-int4-AutoRound
+  # model: qwen3.5  alias: qwen35
   # ---------------------------------------------------------------------------
-
   - model_name: qwen3.5
 
     litellm_params:
@@ -595,7 +661,8 @@ model_list:
       model: openai/qwen3.5
       api_base: os.environ/QWEN3_5_122B_API_BASE
       api_key: os.environ/LOCAL_VLLM_API_KEY
-      request_timeout: 300
+      request_timeout: 600
+      num_retries: 0
     rebuild: true
 
     model_info:
@@ -612,6 +679,11 @@ model_list:
       max_num_batched_tokens: 32768
       max_num_seqs: 8
       load_format: instanttensor
+      speculative_config:
+        method: ngram
+        num_speculative_tokens: 5
+        prompt_lookup_max: 4
+        prompt_lookup_min: 2
       enable_chunked_prefill: true
       attention_backend: FLASHINFER
       generation_config: vllm
@@ -635,7 +707,7 @@ model_list:
       upstream: "https://huggingface.co/Intel/Qwen3.5-122B-A10B-int4-AutoRound"
 
   # ---------------------------------------------------------------------------
-  # Qwen3.8: standalone Spark, BF16 weights/cache, native MTP decoding
+  # model: qwen3.8-27B  alias: qwen3.8
   # ---------------------------------------------------------------------------
   - model_name: qwen3.8-27B
     litellm_params:
@@ -643,7 +715,8 @@ model_list:
       model: openai/qwen3.8-27B
       api_base: os.environ/QWEN3_8_27B_API_BASE
       api_key: os.environ/LOCAL_VLLM_API_KEY
-      request_timeout: 300
+      request_timeout: 600
+      num_retries: 0
     rebuild: true
     model_info:
       mode: inference
@@ -684,7 +757,7 @@ model_list:
       upstream: "See upstream model publisher"
 
   # ---------------------------------------------------------------------------
-  # Qwen3-Coder-30B-A3B-Instruct: standalone Spark, BF16, DFlash decoding
+  # model: qwen3-coder-30b-a3b-instruct  alias: qwen3-coder-30b
   # ---------------------------------------------------------------------------
   - model_name: qwen3-coder-30b-a3b-instruct
     litellm_params:
@@ -692,7 +765,8 @@ model_list:
       model: openai/qwen3-coder-30b-a3b-instruct
       api_base: os.environ/QWEN3_CODER_30B_A3B_INSTRUCT_API_BASE
       api_key: os.environ/LOCAL_VLLM_API_KEY
-      request_timeout: 300
+      request_timeout: 600
+      num_retries: 0
     rebuild: true
     model_info:
       mode: inference

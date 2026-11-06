@@ -637,6 +637,41 @@ class TestMultiModel(unittest.TestCase):
         )
         self.assertNotIn("group/batch startup", self.output.getvalue())
 
+    def test_missing_action_and_help_list_all_cli_options(self):
+        options = (
+            "--start",
+            "--stop",
+            "--ps",
+            "--show-log",
+            "--stream-log",
+            "--show-log-path",
+            "--clean-log",
+            "--follow",
+            "--tail",
+            "--recreate",
+            "--no-reuse-existing",
+            "--startup-logs",
+            "--startup-timeout",
+            "--quiet",
+            "--dry-run",
+            "--group",
+            "--list",
+            "--help",
+        )
+        for target in ("first", "litellm"):
+            with self.subTest(target=target):
+                self.output.seek(0)
+                self.output.truncate()
+                with self.assertRaises(SystemExit) as error:
+                    self.run_command(target)
+                self.assertEqual(error.exception.code, 1)
+                text = self.output.getvalue()
+                for option in options:
+                    self.assertIn(option, text)
+        help_text = self.stack.generate_help()
+        for option in options:
+            self.assertIn(option, help_text)
+
     def test_log_view_defaults_to_full_history(self):
         self.assertEqual(self.args("first", "--show-log").tail, "all")
         self.assertEqual(self.args("first", "--show-log", "--tail", "50").tail, "50")
@@ -1303,6 +1338,7 @@ class TestMultiModel(unittest.TestCase):
         }
         for entry in example["model_list"]:
             with self.subTest(model=entry["model_name"]):
+                self.assertEqual(entry["litellm_params"]["num_retries"], 0)
                 info = entry["model_info"]
                 if info.get("mode") in ("embedding", "rerank"):
                     self.assertEqual(expected[entry["model_name"]], {})

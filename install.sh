@@ -228,6 +228,7 @@ RUNTIME_MODULES=(
     hls_startup.py
     hls_terminal.py
     harinezumigel-llm-stack.py
+    test_configured_models.py
 )
 for module in "${RUNTIME_MODULES[@]}"; do
     if [[ ! -f "$SCRIPT_DIR/src/$module" ]]; then
@@ -532,6 +533,7 @@ for module in "${RUNTIME_MODULES[@]}"; do
 done
 chmod +x "$INSTALL_DIR/src/harinezumigel-llm-stack.py"
 SYMLINK_PATH="$HOME/.local/bin/harinezumigel-llm-stack"
+chmod +x "$INSTALL_DIR/src/test_configured_models.py"
 mkdir -p "$HOME/.local/bin"
 
 if [[ -L "$SYMLINK_PATH" ]]; then

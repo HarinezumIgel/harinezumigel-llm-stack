@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Memory preflight regression tests without Docker or GPU side effects."""
 
 import io
@@ -133,3 +134,7 @@ class TestSharedMemoryPreflight(unittest.TestCase):
                     self.checks.check_gpu_memory(["one"], 0.5)
                 read_memory.assert_not_called()
                 self.assertIn("requires NVIDIA GB10", self.output.getvalue())
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -131,7 +131,7 @@ from hls_preflight import PreflightChecks
 from hls_litellm_security import LiteLLMSecurityError, check_litellm_environment
 from hls_terminal import terminal_style, terminal_print as print
 
-__version__ = "1.5.3/102 10/29/2026"
+__version__ = "1.5.4/110 11/06/2026"
 
 
 def style_help(text: str, program: str) -> str:
@@ -1533,6 +1533,7 @@ Examples:
     {prog} litellm --stop
 
 """
+        text += "\nCLI options:\n" + _build_argument_parser().format_help()
         return style_help(text, prog)
 
     # ------------------------------------------------------------------
@@ -3312,8 +3313,11 @@ Examples:
 
             print(
                 "ERROR: Specify an action for litellm "
-                "(--start, --stop, --show-log, --show-log-path, or --clean-log)"
+                "(--start, --stop, --show-log, --stream-log, --show-log-path, "
+                "or --clean-log)"
             )
+            print()
+            print(_build_argument_parser().format_help())
             sys.exit(1)
 
         self.load_models()
@@ -3332,12 +3336,6 @@ Examples:
             )
             sys.exit(1)
 
-        if self.handle_logs(args):
-            return
-
-        if self.handle_ps(args):
-            return
-
         if args.recreate and (not args.start or not args.model):
             print("ERROR: --recreate requires --start and a model or alias")
             sys.exit(1)
@@ -3345,6 +3343,12 @@ Examples:
         if args.recreate and args.stop:
             print("ERROR: --recreate is not allowed when --stop is given")
             sys.exit(1)
+
+        if self.handle_logs(args):
+            return
+
+        if self.handle_ps(args):
+            return
 
         if self.handle_stop(args):
             return
@@ -3357,12 +3361,7 @@ Examples:
         if not args.start and not args.show_log and not args.show_log_path:
             print(f"ERROR: Specify an action for model '{args.model}'")
             print()
-            print("Available actions:")
-            print("  --start              Start the container")
-            print("  --start --stream-log Start and show logs")
-            print("  --show-log           View logs")
-            print("  --stream-log         Follow logs")
-            print("  --stop               Stop the container")
+            print(_build_argument_parser().format_help())
             sys.exit(1)
 
         resolved = self._resolve_model_name(args.model)
@@ -3439,8 +3438,8 @@ def program_name() -> str:
     return Path(sys.argv[0]).name
 
 
-def parse_args() -> argparse.Namespace:
-    """Parse CLI arguments."""
+def _build_argument_parser() -> argparse.ArgumentParser:
+    """Build the shared CLI parser for parsing and complete option help."""
     parser = argparse.ArgumentParser(
         prog=program_name(),
         add_help=False,
@@ -3471,8 +3470,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--stop", action="store_true", help="Stop the model container")
     parser.add_argument("--ps", action="store_true", help="Show container status")
-    parser.add_argument("--recreate", action="store_true")
-    parser.add_argument("--no-reuse-existing", action="store_true")
+    parser.add_argument(
+        "--recreate",
+        action="store_true",
+        help="Recreate the model container with --start (requires rebuild: true)",
+    )
+    parser.add_argument(
+        "--no-reuse-existing",
+        action="store_true",
+        help="Do not reuse an existing running container during startup",
+    )
 
     parser.add_argument(
         "--show-log",
@@ -3500,14 +3507,25 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Follow log output (use with --show-log or use --stream-log)",
     )
-    parser.add_argument("--tail", default="all")
+    parser.add_argument(
+        "--tail", default="all", help="Log lines to show (default: all)"
+    )
 
-    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Preview actions without making changes"
+    )
     parser.add_argument(
         "--list", action="store_true", help="List model aliases and groups"
     )
-    parser.add_argument("--help", action="store_true")
+    parser.add_argument(
+        "--help", action="store_true", help="Show examples and all CLI options"
+    )
+    return parser
 
+
+def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments."""
+    parser = _build_argument_parser()
     args = parser.parse_intermixed_args()
     args.model = args.models[0] if args.models else None
     args.wait_for_startup = args.startup_timeout is not None
