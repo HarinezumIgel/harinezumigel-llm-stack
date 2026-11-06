@@ -466,9 +466,11 @@ model_list:
       model: openai/mistral_7b
       api_base: os.environ/MISTRAL_7B_API_BASE
       api_key: os.environ/LOCAL_VLLM_API_KEY
-      request_timeout: 90
+      request_timeout: 600
+      num_retries: 0
     rebuild: true
     model_info:
+      mode: inference
       alias: mistral
       model_dir: mistral-7b-instruct-v0.3
       generation_config: vllm
@@ -480,13 +482,19 @@ model_list:
       max_output_tokens: 2048
       max_tokens: 2048
       gpu_memory_utilization: 0.27
+      enforce_eager: false
       ipc: host
       dtype: auto
       max_num_seqs: 1
       max_num_batched_tokens: 4096
-      enforce_eager: false
+      speculative_config:
+        method: ngram
+        num_speculative_tokens: 5
+        prompt_lookup_max: 4
+        prompt_lookup_min: 2
       enable_prefix_caching: true
-      description: "RAG answer generation with Mistral 7B"
+      description: "Fast general assistant, summaries, command-line help."
+      detail: "Mistral 7B v0.3 fast lightweight fallback model with 32K context"
       license: "See upstream model license"
       upstream: "https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3"
 ```
