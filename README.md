@@ -562,10 +562,12 @@ not inside `model_info`, and permits explicit recreation.
 
 | Optional `model_info` fields | Purpose |
 |---|---|
-| `alias`, `description`, `detail`, `license`, `upstream` | CLI naming and metadata |
+| `mode` | Launcher classification for startup summaries and log hints (`inference`, `embedding`, or `rerank`) |
+| `alias`, `description`, `detail`, `license`, `upstream` | CLI naming and model metadata |
 | `dtype`, `quantization`, `kv_cache_dtype` | Weight / cache precision; match the model and image |
+| `max_tokens` | Optional LiteLLM model token-limit metadata |
 | `max_num_seqs`, `max_num_batched_tokens` | Concurrency and batching |
-| `ipc`, `enforce_eager`, `enable_prefix_caching`, `enable_chunked_prefill` | Docker IPC and vLLM execution settings |
+| `ipc`, `enforce_eager`, `trust_remote_code`, `enable_prefix_caching`, `enable_chunked_prefill` | Docker IPC and vLLM execution settings; only enable remote code for trusted models |
 | `generation_config` | Generation config source; defaults to `vllm`, avoiding inherited model defaults |
 | `override_generation_config` | Backend generation defaults, forwarded as JSON to vLLM |
 | `attention_backend`, `attention_config` | Attention implementation settings |
