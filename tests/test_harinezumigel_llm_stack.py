@@ -3019,8 +3019,282 @@ class TestCLIProgramName(unittest.TestCase):
         self.assertNotIn("harinezumigel-llm-stack", output.getvalue())
 
 
+class TestStackStatus(unittest.TestCase):
+    """Keep global status read-only and scoped to configured services."""
+
+    def setUp(self) -> None:
+        self.stack = harinezumigel_llm_stack.LLMStack(harinezumigel_llm_stack.APP)
+        self.stack.models = {
+            "qwen_model": MagicMock(),
+            "qwen_model_extra": MagicMock(),
+            "missing": MagicMock(),
+        }
+
+    def test_status_includes_docker_details_and_configured_litellm(self) -> None:
+        containers = [
+            {
+                "Names": "vllm-qwen_model-8001",
+                "State": "running",
+                "ID": "abc123",
+                "Image": "vllm/example:tag",
+                "Status": "Up 2 hours (healthy)",
+                "Ports": "0.0.0.0:8001->8000/tcp",
+            },
+            {
+                "Names": "vllm-qwen_model-8002",
+                "State": "paused",
+                "ID": "paused123",
+                "Image": "vllm/example:tag",
+                "Status": "Up 1 hour (Paused)",
+                "Ports": "8000/tcp",
+            },
+            {
+                "Names": "vllm-qwen_model_extra-8003",
+                "State": "exited",
+                "ID": "def456",
+                "Image": "vllm/old:tag",
+                "Status": "Exited (1) 3 minutes ago",
+                "Ports": "",
+            },
+        ]
+        for name in (
+            "unrelated",
+            "vllm-unconfigured-8004",
+            "vllm-qwen_model-8001-helper",
+            "vllm-qwen_model-１２",
+        ):
+            containers.append({**containers[0], "Names": name})
+        config_path = self.stack.config.litellm_config
+        processes = (
+            f"123 /opt/litellm/venv/bin/litellm --config {config_path}\n"
+            "456 /opt/litellm/venv/bin/litellm --config /other/config.yaml\n"
+        )
+        output = io.StringIO()
+        with (
+            patch.object(sys, "argv", ["llm", "--status"]),
+            patch.object(self.stack, "load_models") as load,
+            patch.object(
+                harinezumigel_llm_stack,
+                "run_command",
+                side_effect=[
+                    MagicMock(
+                        returncode=0,
+                        stdout="\n".join(json.dumps(item) for item in containers),
+                    ),
+                    MagicMock(returncode=0, stdout=processes),
+                ],
+            ) as run,
+            redirect_stdout(output),
+        ):
+            self.stack.run(harinezumigel_llm_stack.parse_args())
+        load.assert_called_once_with()
+        self.assertEqual(
+            [call.args[0] for call in run.call_args_list],
+            [
+                ["docker", "ps", "-a", "--format", "{{json .}}"],
+                ["pgrep", "-fa", "litellm"],
+            ],
+        )
+        text = output.getvalue()
+        for container in containers[:3]:
+            for value in container.values():
+                if value:
+                    self.assertIn(value, text)
+        for container in containers[3:]:
+            self.assertNotIn(container["Names"], text)
+        self.assertIn("missing", text)
+        self.assertIn("not created", text)
+        self.assertIn("LiteLLM: running", text)
+        self.assertIn("PID(s): 123", text)
+        self.assertNotIn("456", text.split("=== LiteLLM Status ===")[1])
+        running_position = text.index("vllm-qwen_model-8001")
+        for value in ("not created", "vllm-qwen_model-8002", "vllm-qwen_model_extra"):
+            self.assertLess(running_position, text.index(value))
+        self.assertGreater(
+            text.index("=== LiteLLM Status ==="),
+            text.index("vllm-qwen_model_extra-8003"),
+        )
+        extra_rows = [
+            line for line in text.splitlines() if "vllm-qwen_model_extra-8003" in line
+        ]
+        self.assertEqual(len(extra_rows), 1)
+        self.assertTrue(extra_rows[0].startswith("qwen_model_extra "))
+
+    def test_status_with_no_containers_or_proxy(self) -> None:
+        output = io.StringIO()
+        with (
+            patch.object(
+                harinezumigel_llm_stack,
+                "run_command",
+                side_effect=[
+                    MagicMock(returncode=0, stdout=""),
+                    MagicMock(returncode=1, stdout=""),
+                ],
+            ),
+            redirect_stdout(output),
+        ):
+            self.stack.show_status()
+        self.assertEqual(output.getvalue().count("not created"), 3)
+        self.assertIn("LiteLLM: stopped", output.getvalue())
+        self.assertNotIn("PID(s):", output.getvalue())
+
+    def test_running_status_is_green_only_on_capable_terminals(self) -> None:
+        containers = [
+            {
+                "Names": "vllm-qwen_model-8001",
+                "State": "running",
+                "ID": "abc123",
+                "Image": "vllm/example:tag",
+                "Status": "Up 2 hours",
+                "Ports": "8000/tcp",
+            },
+            {
+                "Names": "vllm-qwen_model_extra-8002",
+                "State": "exited",
+                "ID": "def456",
+                "Image": "vllm/example:tag",
+                "Status": "Exited (0)",
+                "Ports": "",
+            },
+        ]
+        for tty, env, green in (
+            (True, {"TERM": "xterm"}, True),
+            (False, {"TERM": "xterm"}, False),
+            (True, {"TERM": "xterm", "NO_COLOR": ""}, False),
+            (True, {"TERM": "dumb"}, False),
+        ):
+            output = io.StringIO()
+            with (
+                self.subTest(tty=tty, env=env),
+                patch.dict(os.environ, env, clear=True),
+                patch.object(
+                    harinezumigel_llm_stack,
+                    "run_command",
+                    return_value=MagicMock(
+                        returncode=0,
+                        stdout="\n".join(json.dumps(item) for item in containers),
+                    ),
+                ),
+                patch.object(self.stack, "_find_litellm_pids", return_value=["123"]),
+                redirect_stdout(output),
+                patch.object(output, "isatty", return_value=tty),
+            ):
+                self.stack.show_status()
+            lines = output.getvalue().splitlines()
+            running = next(line for line in lines if "vllm-qwen_model-8001" in line)
+            exited = next(
+                line for line in lines if "vllm-qwen_model_extra-8002" in line
+            )
+            missing = next(line for line in lines if "not created" in line)
+            proxy = next(line for line in lines if "LiteLLM:" in line)
+            self.assertEqual(running.startswith("\033[32m"), green)
+            self.assertEqual(proxy.startswith("\033[32m"), green)
+            self.assertNotIn("\033[", exited)
+            self.assertNotIn("\033[", missing)
+            if not green:
+                self.assertNotIn("\033[", output.getvalue())
+
+    def test_status_with_empty_configuration_still_shows_proxy(self) -> None:
+        self.stack.models = {}
+        output = io.StringIO()
+        with (
+            patch.object(
+                harinezumigel_llm_stack,
+                "run_command",
+                return_value=MagicMock(returncode=0, stdout=""),
+            ),
+            patch.object(self.stack, "_find_litellm_pids", return_value=["123"]),
+            redirect_stdout(output),
+        ):
+            self.stack.show_status()
+        self.assertIn("LiteLLM: running", output.getvalue())
+
+    def test_status_query_errors_are_not_reported_as_stopped(self) -> None:
+        cases = [
+            (1, "", "permission denied", "Failed to query Docker"),
+            (0, "not json", "", "Invalid Docker status response"),
+            (0, "{}", "", "missing expected text fields"),
+            (0, "[]", "", "missing expected text fields"),
+            (0, '{"Names": 42}', "", "missing expected text fields"),
+        ]
+        for returncode, stdout, stderr, message in cases:
+            with self.subTest(stdout=stdout, returncode=returncode):
+                output = io.StringIO()
+                with (
+                    patch.object(
+                        harinezumigel_llm_stack,
+                        "run_command",
+                        return_value=MagicMock(
+                            returncode=returncode, stdout=stdout, stderr=stderr
+                        ),
+                    ),
+                    redirect_stdout(output),
+                    self.assertRaises(SystemExit) as error,
+                ):
+                    self.stack.show_status()
+                self.assertEqual(error.exception.code, 1)
+                self.assertIn(message, output.getvalue())
+                self.assertNotIn("stopped", output.getvalue())
+
+    def test_status_process_query_failure_is_an_error(self) -> None:
+        output = io.StringIO()
+        with (
+            patch.object(
+                harinezumigel_llm_stack,
+                "run_command",
+                side_effect=[
+                    MagicMock(returncode=0, stdout=""),
+                    MagicMock(returncode=2, stdout="", stderr="process query failed"),
+                ],
+            ),
+            redirect_stdout(output),
+            self.assertRaises(SystemExit) as error,
+        ):
+            self.stack.show_status()
+        self.assertEqual(error.exception.code, 1)
+        self.assertIn("Failed to query LiteLLM processes", output.getvalue())
+        self.assertNotIn("LiteLLM: stopped", output.getvalue())
+
+
 class TestCLIParseArgs(unittest.TestCase):
     """Test CLI argument parsing behavior."""
+
+    def test_status_is_standalone(self) -> None:
+        with patch.object(sys, "argv", ["llm", "--status"]):
+            args = harinezumigel_llm_stack.parse_args()
+        self.assertTrue(args.status)
+        self.assertIsNone(args.model)
+
+    def test_status_rejects_other_actions_and_selections(self) -> None:
+        for extra in (
+            ["--start"],
+            ["--stop"],
+            ["--clean-log"],
+            ["--recreate"],
+            ["--ps"],
+            ["--list"],
+            ["--show-log"],
+            ["--stream-log"],
+            ["--startup-logs"],
+            ["--group", "rag"],
+            ["qwen"],
+            ["litellm"],
+            ["all"],
+        ):
+            with (
+                self.subTest(extra=extra),
+                patch.object(sys, "argv", ["llm", "--status", *extra]),
+                redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit) as error,
+            ):
+                harinezumigel_llm_stack.parse_args()
+            self.assertEqual(error.exception.code, 2)
+
+    def test_status_help_does_not_query_status(self) -> None:
+        with patch.object(sys, "argv", ["llm", "--status", "--help"]):
+            args = harinezumigel_llm_stack.parse_args()
+        self.assertTrue(args.help)
+        self.assertFalse(args.status)
 
     def test_litellm_missing_action_lists_stream_log(self) -> None:
         """The LiteLLM action error should list --stream-log as a valid action."""

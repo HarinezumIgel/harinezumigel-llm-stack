@@ -781,6 +781,7 @@ port, so similarly prefixed model names are not included in its logs or stops.
 | Wait for one backend with bounded startup logs | `harinezumigel-llm-stack mistral --start --startup-logs` |
 | Use a different readiness deadline | `harinezumigel-llm-stack --group rag --start --startup-timeout 600` |
 | Preview selected recreation | `harinezumigel-llm-stack --group rag --start --recreate --dry-run` |
+| Read-only status of all configured models and LiteLLM | `harinezumigel-llm-stack --status` |
 | Container status for configured models | `harinezumigel-llm-stack all --ps` |
 | Recent grouped log snapshots | `harinezumigel-llm-stack --group rag --show-log --tail 50` |
 | Follow one backend | `harinezumigel-llm-stack mistral --stream-log` |
@@ -790,6 +791,17 @@ port, so similarly prefixed model names are not included in its logs or stops.
 
 `--help` and missing-action errors list every CLI option directly from the
 argument parser, including log paths, cleanup, status, and startup modifiers.
+
+Use `--status` alone to list every configured model, including models without
+containers, and the LiteLLM proxy's running/stopped state and PIDs for this
+configuration. Matching containers include `docker ps -a` details: name, state,
+ID, image, uptime/exit status, and published ports. Running model containers
+appear first, with LiteLLM status last. Unrelated containers are excluded.
+Running rows are green on supported interactive terminals (respecting
+`NO_COLOR` and the existing success-color setting).
+This command only reads status; it does not start, stop, or modify
+services. Process/container state does not imply API readiness. Docker query
+failures are reported as errors rather than as stopped models.
 
 ### Check all configured models
 

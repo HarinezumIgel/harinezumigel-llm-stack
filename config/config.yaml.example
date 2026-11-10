@@ -20,7 +20,7 @@ litellm_settings:
 
 model_groups:
   rag:
-    - mistral
+    - qwen2.5-7b
     - guard
     - judge
     - bge-m3
@@ -34,7 +34,7 @@ model_groups:
     - snowflake-embedder
     - litellm
   quick:
-    - mistral
+    - qwen2.5-7b
     - guard
 
 
@@ -575,6 +575,54 @@ model_list:
 
       license: "Apache 2.0"
       upstream: "Qwen"
+
+
+  # ---------------------------------------------------------------------------
+  # model: qwen2_5_7b_instruct  alias: qwen2.5-7b
+  # ---------------------------------------------------------------------------
+  - model_name: qwen2_5_7b_instruct
+    litellm_params:
+      litellm_provider: openai
+      model: openai/qwen2_5_7b_instruct
+      api_base: os.environ/QWEN2_5_7B_INSTRUCT_API_BASE
+      api_key: os.environ/LOCAL_VLLM_API_KEY
+      request_timeout: 600
+      num_retries: 0
+    rebuild: true
+    model_info:
+      mode: inference
+      model_dir: Qwen2.5-7B-Instruct
+      generation_config: vllm
+      speculative_config:
+        method: ngram
+        num_speculative_tokens: 5
+        prompt_lookup_max: 4
+        prompt_lookup_min: 2
+      override_generation_config:
+        temperature: 0.7
+        top_p: 0.8
+        top_k: 20
+      context_length: 32768
+      max_input_tokens: 28672
+      max_output_tokens: 4096
+      max_tokens: 4096
+      gpu_memory_utilization: 0.27
+      ipc: host
+      dtype: auto
+      max_num_seqs: 1
+      max_num_batched_tokens: 4096
+      quantization: null
+      kv_cache_dtype: auto
+      enable_prefix_caching: true
+      cache_creation_input_token_cost: 0
+      cache_read_input_token_cost: 0
+      input_cost_per_token: 0
+      output_cost_per_token: 0
+      description: "General-purpose assistant for chat, reasoning, and everyday tasks."
+      detail: "Qwen2.5-7B-Instruct with 32K context and native model precision"
+      alias: "qwen2.5-7b"
+      license: "Apache-2.0"
+      upstream: "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct"
 
 
   # ---------------------------------------------------------------------------

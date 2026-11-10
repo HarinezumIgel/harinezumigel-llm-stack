@@ -42,6 +42,9 @@ It manages:
     # List configured models (shows model names and aliases)
     harinezumigel-llm-stack --list
 
+    # Show configured model and LiteLLM status with Docker details
+    harinezumigel-llm-stack --status
+
     # Start a model (reuses existing container if available)
     harinezumigel-llm-stack mistral_7b --start
 
@@ -131,7 +134,7 @@ from hls_preflight import PreflightChecks
 from hls_litellm_security import LiteLLMSecurityError, check_litellm_environment
 from hls_terminal import terminal_style, terminal_print as print
 
-__version__ = "1.5.4/110 11/06/2026"
+__version__ = "1.5.4/114 11/10/2026"
 
 
 def style_help(text: str, program: str) -> str:
@@ -1233,31 +1236,98 @@ class LLMStack:
 
         return result.stdout.strip() or None
 
+    def _container_matches_model(self, name: str, model_name: str) -> bool:
+        """Match a configured model's Docker-safe name and numeric port suffix."""
+        prefix = f"{VLLM_CONTAINER_PREFIX}{docker_safe_name(model_name)}-"
+        suffix = name[len(prefix) :]
+        return name.startswith(prefix) and suffix.isascii() and suffix.isdigit()
+
     def _find_all_vllm_containers(self, model_name: str) -> list[str]:
         """Find all vLLM container names for a model (running and stopped)."""
-        prefix = f"{VLLM_CONTAINER_PREFIX}{docker_safe_name(model_name)}-"
         return [
             n
             for n in self._docker_list_container_names(all_containers=True)
-            if n.startswith(prefix)
-            and n[len(prefix) :].isascii()
-            and n[len(prefix) :].isdigit()
+            if self._container_matches_model(n, model_name)
         ]
 
     def _find_running_vllm_containers(self, model_name: str) -> list[str]:
         """Find running vLLM container names for a model."""
-        prefix = f"{VLLM_CONTAINER_PREFIX}{docker_safe_name(model_name)}-"
         return [
             n
             for n in self._docker_list_container_names(all_containers=False)
-            if n.startswith(prefix)
-            and n[len(prefix) :].isascii()
-            and n[len(prefix) :].isdigit()
+            if self._container_matches_model(n, model_name)
         ]
 
     # ------------------------------------------------------------------
     # Display helpers
     # ------------------------------------------------------------------
+
+    def show_status(self) -> None:
+        """Show configured backends' Docker details and this config's LiteLLM PIDs."""
+        result = run_command(
+            ["docker", "ps", "-a", "--format", "{{json .}}"], capture=True
+        )
+        if result.returncode != 0:
+            print("ERROR: Failed to query Docker containers")
+            print(result.stderr.strip())
+            sys.exit(1)
+
+        fields = ("Names", "State", "ID", "Image", "Status", "Ports")
+        containers: list[dict[str, str]] = []
+        for line in result.stdout.splitlines():
+            if not line.strip():
+                continue
+            try:
+                container = cast(object, json.loads(line))
+            except json.JSONDecodeError as exc:
+                print(f"ERROR: Invalid Docker status response: {exc}")
+                sys.exit(1)
+            if not isinstance(container, dict) or not all(
+                isinstance(container.get(field), str) for field in fields
+            ):
+                print("ERROR: Docker status response is missing expected text fields")
+                sys.exit(1)
+            containers.append(cast(dict[str, str], container))
+
+        pids = self._find_litellm_pids()
+        print("\n=== Configured Model Status ===\n")
+        rows = [("MODEL", "STATE", "CONTAINER", "ID", "IMAGE", "STATUS", "PORTS")]
+        for model_name in sorted(self.models):
+            matches = [
+                container
+                for container in containers
+                if self._container_matches_model(container["Names"], model_name)
+            ]
+            if not matches:
+                rows.append((model_name, "not created", "-", "-", "-", "-", "-"))
+            for container in sorted(matches, key=lambda item: item["Names"]):
+                rows.append(
+                    (
+                        model_name,
+                        container["State"],
+                        container["Names"],
+                        container["ID"],
+                        container["Image"],
+                        container["Status"],
+                        container["Ports"] or "-",
+                    )
+                )
+        rows[1:] = sorted(
+            rows[1:], key=lambda row: (row[1] != "running", row[0], row[2])
+        )
+        widths = [max(len(row[index]) for row in rows) for index in range(7)]
+        for row in rows:
+            line = "  ".join(value.ljust(width) for value, width in zip(row, widths))
+            print(terminal_style(line, code="32") if row[1] == "running" else line)
+
+        print("\nStatus reports process/container state, not API readiness.")
+        print("\n=== LiteLLM Status ===\n")
+        proxy_status = f"LiteLLM: {'running' if pids else 'stopped'}"
+        print(terminal_style(proxy_status, code="32") if pids else proxy_status)
+        if pids:
+            print(f"  PID(s): {', '.join(pids)}")
+        print(f"  Config: {self.config.litellm_config}")
+        print(f"  Bind: {self.config.litellm_bind_host}:{self.config.litellm_port}")
 
     def _print_container_reuse_notice(
         self, container_name: str, model_name: str, port: int
@@ -1467,6 +1537,11 @@ Examples:
     {prog} --list
 
     Run without arguments to show detailed model settings.
+
+  Show configured model and proxy status:
+  ---------------------------------------
+
+    {prog} {"--status":<42} # read-only status with Docker details and LiteLLM PIDs
 
   Start models (model name or alias):
   -----------------------------------
@@ -3262,6 +3337,11 @@ Examples:
         Safety: All destructive operations require explicit flags and respect
         dry-run mode. Default behavior is conservative (reuse, don't recreate).
         """
+        if getattr(args, "status", False):
+            self.load_models()
+            self.show_status()
+            return
+
         if (
             getattr(args, "group", None) is not None
             or len(getattr(args, "models", [])) > 1
@@ -3471,6 +3551,11 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stop", action="store_true", help="Stop the model container")
     parser.add_argument("--ps", action="store_true", help="Show container status")
     parser.add_argument(
+        "--status",
+        action="store_true",
+        help="Show all configured models with Docker details and LiteLLM process status",
+    )
+    parser.add_argument(
         "--recreate",
         action="store_true",
         help="Recreate the model container with --start (requires rebuild: true)",
@@ -3527,6 +3612,15 @@ def parse_args() -> argparse.Namespace:
     """Parse CLI arguments."""
     parser = _build_argument_parser()
     args = parser.parse_intermixed_args()
+    if args.status and not args.help:
+        if args.models or any(
+            value != parser.get_default(name)
+            for name, value in vars(args).items()
+            if name not in ("status", "models")
+        ):
+            parser.error("--status must be used alone")
+    if args.help:
+        args.status = False
     args.model = args.models[0] if args.models else None
     args.wait_for_startup = args.startup_timeout is not None
     if args.startup_timeout is None:

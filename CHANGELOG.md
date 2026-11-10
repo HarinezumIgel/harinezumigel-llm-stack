@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [11/10/2026 Revision 114]
+
+### Added
+- Add Qwen2.5-7B-Instruct as the `qwen2.5-7b` example model, with its API
+  endpoint settings and membership in the `rag` and `quick` groups.
+- Add standalone, read-only `--status` output for all configured models and the
+  LiteLLM proxy. Show matching container state, ID, image, uptime or exit
+  status, and published ports, including models without containers; show
+  LiteLLM process IDs and configured endpoint details. Report query errors
+  explicitly, and clarify that process/container state does not indicate API
+  readiness.
+- Add regression tests for status output, configured-service scoping, terminal
+  colors, standalone argument validation, and query failures.
+
 ## [10/29/2026 Revision 102]
 
 ### Added
