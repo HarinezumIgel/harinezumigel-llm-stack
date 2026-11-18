@@ -131,10 +131,11 @@ from hls_startup import (
 )
 from hls_selection import load_groups, select_models
 from hls_preflight import PreflightChecks
+from hls_request_logging import RequestLogging
 from hls_litellm_security import LiteLLMSecurityError, check_litellm_environment
 from hls_terminal import terminal_style, terminal_print as print
 
-__version__ = "1.5.4/114 11/10/2026"
+__version__ = "1.5.6/125 11/18/2026"
 
 
 def style_help(text: str, program: str) -> str:
@@ -787,6 +788,7 @@ class StartOptions:
     reuse_existing: bool
     recreate: bool
     memory_capacity_only: bool = False
+    enable_log_requests: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -810,6 +812,7 @@ class LLMStack:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
         self.preflight_checks = PreflightChecks(config.vllm_docker_image, run_command)
+        self.request_logging = RequestLogging(run_command)
         self.models: dict[str, ModelDeployment] = {}
         self.model_groups: dict[str, list[str]] = {}
         self.litellm_keep_alive: float | None = None
@@ -1262,8 +1265,124 @@ class LLMStack:
     # Display helpers
     # ------------------------------------------------------------------
 
+    def _vllm_readiness(self, container: str) -> str:
+        """Find the startup-complete message in logs from the current run."""
+        inspect_command = [
+            "docker",
+            "inspect",
+            "-f",
+            "{{.State.StartedAt}} {{.State.Status}}",
+            container,
+        ]
+        inspect = run_command(inspect_command, capture=True)
+        state = inspect.stdout.strip().split()
+        if inspect.returncode != 0 or len(state) != 2 or state[1] != "running":
+            print(f"WARNING: Cannot determine latest start for {container}")
+            if inspect.stderr.strip():
+                print(inspect.stderr.strip())
+            return "unknown"
+        started_at = state[0]
+        ready = False
+        try:
+            with subprocess.Popen(
+                ["docker", "logs", "--since", started_at, container],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                errors="replace",
+            ) as logs:
+                assert logs.stdout is not None
+                for line in logs.stdout:
+                    if re.search(r"\bINFO:\s+Application startup complete\.\s*$", line):
+                        ready = True
+                returncode = logs.wait()
+        except OSError as exc:
+            print(f"WARNING: Cannot read startup logs for {container}: {exc}")
+            return "unknown"
+        if returncode != 0:
+            print(
+                f"WARNING: Cannot read startup logs for {container} (exit {returncode})"
+            )
+            return "unknown"
+        current = run_command(inspect_command, capture=True)
+        if current.returncode != 0 or current.stdout.strip().split() != state:
+            print(f"WARNING: Container state changed while checking {container}")
+            return "unknown"
+        return "ready" if ready else "starting"
+
+    def _litellm_readiness(self, pids: list[str]) -> str:
+        """Match timestamped Uvicorn startup messages to current proxy processes."""
+        starts: dict[str, float] = {}
+        for pid in pids:
+            result = run_command(["ps", "-o", "etimes=", "-p", pid], capture=True)
+            elapsed = result.stdout.strip()
+            if result.returncode != 0 or not elapsed.isascii() or not elapsed.isdigit():
+                print(f"WARNING: Cannot determine start time for LiteLLM PID {pid}")
+                if result.stderr.strip():
+                    print(result.stderr.strip())
+                return "unknown"
+            starts[pid] = time.time() - int(elapsed) - 2
+
+        logs_dir = self._litellm_logs_dir(create=False)
+        states = {pid: "unknown" for pid in pids}
+        try:
+            paths = sorted(logs_dir.glob("litellm_*.log"))
+            for path in paths:
+                if path.is_symlink() or not path.is_file():
+                    continue
+                if path.stat().st_mtime < min(starts.values()):
+                    continue
+                current_pid: str | None = None
+                with path.open(encoding="utf-8", errors="replace") as log:
+                    for line in log:
+                        try:
+                            entry = cast(object, json.loads(line))
+                        except json.JSONDecodeError:
+                            continue
+                        if not isinstance(entry, dict):
+                            continue
+                        fields = cast(dict[str, object], entry)
+                        if fields.get("event") == "litellm_start_attempt":
+                            current_pid = None
+                        if fields.get("component") != "uvicorn.error":
+                            continue
+                        message = fields.get("message")
+                        timestamp = fields.get("timestamp")
+                        if not isinstance(message, str) or not isinstance(
+                            timestamp, str
+                        ):
+                            continue
+                        match = re.fullmatch(
+                            r"Started server process \[(\d+)\]", message
+                        )
+                        if match:
+                            current_pid = None
+                            pid = match.group(1)
+                            try:
+                                recorded_at = datetime.datetime.fromisoformat(
+                                    timestamp
+                                ).timestamp()
+                            except ValueError:
+                                continue
+                            if (
+                                pid in starts
+                                and starts[pid] <= recorded_at <= time.time()
+                            ):
+                                current_pid = pid
+                                states[pid] = "starting"
+                        elif message == "Application startup complete." and current_pid:
+                            states[current_pid] = "ready"
+        except OSError as exc:
+            print(f"WARNING: Cannot read LiteLLM startup logs: {exc}")
+            return "unknown"
+        if "unknown" in states.values():
+            return "unknown"
+        if "starting" in states.values():
+            return "starting"
+        return "ready"
+
     def show_status(self) -> None:
-        """Show configured backends' Docker details and this config's LiteLLM PIDs."""
+        """Show container and proxy state and current-run startup readiness."""
         result = run_command(
             ["docker", "ps", "-a", "--format", "{{json .}}"], capture=True
         )
@@ -1282,16 +1401,31 @@ class LLMStack:
             except json.JSONDecodeError as exc:
                 print(f"ERROR: Invalid Docker status response: {exc}")
                 sys.exit(1)
-            if not isinstance(container, dict) or not all(
-                isinstance(container.get(field), str) for field in fields
+            if not isinstance(container, dict):
+                print("ERROR: Docker status response is missing expected text fields")
+                sys.exit(1)
+            container_fields = cast(dict[str, object], container)
+            if not all(
+                isinstance(container_fields.get(field), str) for field in fields
             ):
                 print("ERROR: Docker status response is missing expected text fields")
                 sys.exit(1)
-            containers.append(cast(dict[str, str], container))
+            containers.append(cast(dict[str, str], container_fields))
 
         pids = self._find_litellm_pids()
         print("\n=== Configured Model Status ===\n")
-        rows = [("MODEL", "STATE", "CONTAINER", "ID", "IMAGE", "STATUS", "PORTS")]
+        rows = [
+            (
+                "MODEL",
+                "STATE",
+                "READINESS",
+                "CONTAINER",
+                "ID",
+                "IMAGE",
+                "STATUS",
+                "PORTS",
+            )
+        ]
         for model_name in sorted(self.models):
             matches = [
                 container
@@ -1299,12 +1433,19 @@ class LLMStack:
                 if self._container_matches_model(container["Names"], model_name)
             ]
             if not matches:
-                rows.append((model_name, "not created", "-", "-", "-", "-", "-"))
+                rows.append((model_name, "not created", "-", "-", "-", "-", "-", "-"))
             for container in sorted(matches, key=lambda item: item["Names"]):
+                state = container["State"]
+                readiness = (
+                    self._vllm_readiness(container["Names"])
+                    if state == "running"
+                    else "-"
+                )
                 rows.append(
                     (
                         model_name,
-                        container["State"],
+                        state,
+                        readiness,
                         container["Names"],
                         container["ID"],
                         container["Image"],
@@ -1313,17 +1454,29 @@ class LLMStack:
                     )
                 )
         rows[1:] = sorted(
-            rows[1:], key=lambda row: (row[1] != "running", row[0], row[2])
+            rows[1:],
+            key=lambda row: (row[1] in ("running", "restarting"), row[0], row[3]),
         )
-        widths = [max(len(row[index]) for row in rows) for index in range(7)]
+        widths = [max(len(row[index]) for row in rows) for index in range(8)]
         for row in rows:
             line = "  ".join(value.ljust(width) for value, width in zip(row, widths))
-            print(terminal_style(line, code="32") if row[1] == "running" else line)
+            if row[1] == "running":
+                line = terminal_style(line, code="32" if row[2] == "ready" else "36")
+            elif row[1] == "restarting":
+                line = terminal_style(line, code="36")
+            print(line)
 
-        print("\nStatus reports process/container state, not API readiness.")
+        print("\nReadiness reflects startup logs, not current API health.")
         print("\n=== LiteLLM Status ===\n")
         proxy_status = f"LiteLLM: {'running' if pids else 'stopped'}"
-        print(terminal_style(proxy_status, code="32") if pids else proxy_status)
+        readiness = self._litellm_readiness(pids) if pids else "-"
+        if pids:
+            proxy_status += f" ({readiness})"
+        print(
+            terminal_style(proxy_status, code="32" if readiness == "ready" else "36")
+            if pids
+            else proxy_status
+        )
         if pids:
             print(f"  PID(s): {', '.join(pids)}")
         print(f"  Config: {self.config.litellm_config}")
@@ -1552,8 +1705,9 @@ Examples:
     {prog} {"mmarco-reranker --start":<42} # cross-encoder alias (mMARCO)
     {prog} {"mistral_7b --start --stream-log":<42} # start and follow logs (stays attached)
     {prog} {"mistral_7b --start --dry-run":<42} # preview what would be done
-    {prog} {"mistral_7b --start --recreate":<42} # force recreate container
+    {prog} {"mistral_7b --start --recreate":<42} # recreate with request logging
     {prog} {"mistral --start --startup-logs":<42} # bounded startup logs for one model
+    {prog} {"mistral --start --request-logging":<42} # log resolved request sampling parameters
 
   Batch startup:
   --------------
@@ -2029,6 +2183,8 @@ Examples:
         model_dir: Path,
         port: int,
         runtime: dict[str, int | float | str | None],
+        *,
+        enable_log_requests: bool = False,
     ) -> list[str]:
         """Build the Docker command for a vLLM backend."""
         raw_info = model.model_info
@@ -2061,7 +2217,14 @@ Examples:
                 "/etc/localtime:/etc/localtime:ro",
                 "-e",
                 "VLLM_CONFIGURE_LOGGING=1",
+                "--label",
+                f"{RequestLogging.LABEL}=1",
                 self.config.vllm_docker_image,
+                "sh",
+                "-c",
+                RequestLogging.STARTUP,
+                "hls-request-logging",
+                "on" if enable_log_requests else "off",
                 # Some NVIDIA images export internal VLLM_* vars that newer vLLM
                 # versions don't recognize. Remove them for a clean startup.
                 "env",
@@ -2137,7 +2300,6 @@ Examples:
         command.extend(["--generation-config", generation_config])
         if generation_overrides_arg is not None:
             command.extend(["--override-generation-config", generation_overrides_arg])
-
         if raw_info.get("quantization"):
             command.extend(["--quantization", str(raw_info["quantization"])])
 
@@ -2315,7 +2477,7 @@ Examples:
         print(f"KV cache dtype:            {raw_info.get('kv_cache_dtype', '(auto)')}")
         print()
         print("Docker run command:")
-        print("  " + " ".join(redact_command(command)))
+        print("  " + shlex.join(redact_command(command)))
 
     def start_vllm(self, model: ModelDeployment, options: StartOptions) -> None:
         """Start a Dockerized vLLM backend.
@@ -2372,6 +2534,15 @@ Examples:
             print(f"State:     {existing_state}")
             print()
 
+            if not options.recreate:
+                try:
+                    self.request_logging.validate(
+                        container_name, existing_state, options.enable_log_requests
+                    )
+                except RuntimeError as exc:
+                    print(f"ERROR: {exc}")
+                    sys.exit(1)
+
             if options.recreate:
                 print("--recreate was supplied.")
 
@@ -2425,12 +2596,25 @@ Examples:
             )
         self.preflight_checks.check_nvidia_driver(dry_run=options.dry_run)
         if reuse_stopped_container:
+            try:
+                self.request_logging.set_mode(
+                    container_name,
+                    options.enable_log_requests,
+                    dry_run=options.dry_run,
+                )
+            except RuntimeError as exc:
+                print(f"ERROR: {exc}")
+                sys.exit(1)
             self._docker_start_container(container_name, dry_run=options.dry_run)
             self._print_container_reuse_notice(container_name, model.name, options.port)
             return
 
         command = self._build_vllm_command(
-            model, model_dir, options.port, options.runtime
+            model,
+            model_dir,
+            options.port,
+            options.runtime,
+            enable_log_requests=options.enable_log_requests,
         )
         self._print_vllm_start_summary(
             model, model_dir, options.port, options.runtime, command
@@ -3078,6 +3262,10 @@ Examples:
             ("all",),
         )
 
+    @staticmethod
+    def _request_logging_enabled(args: argparse.Namespace) -> bool:
+        return getattr(args, "enable_log_requests", False)
+
     def _batch_start_plan(
         self,
         args: argparse.Namespace,
@@ -3090,6 +3278,7 @@ Examples:
         models_to_start: list[ModelDeployment] = []
         recreating_running_model = False
         ports: set[int] = set()
+        enable_log_requests = self._request_logging_enabled(args)
         for model in selected:
             runtime = self._resolve_runtime_settings(model)
             port = model.api_base_port
@@ -3105,9 +3294,17 @@ Examples:
                     f"--recreate requires top-level rebuild: true for {model.name}"
                 )
             model_dir = self._find_model_dir(model, dry_run=args.dry_run)
-            self._build_vllm_command(model, model_dir, port, runtime)
+            self._build_vllm_command(
+                model,
+                model_dir,
+                port,
+                runtime,
+                enable_log_requests=enable_log_requests,
+            )
             container = f"vllm-{docker_safe_name(model.name)}-{port}"
             state = self._docker_container_state(container)
+            if state is not None and not args.recreate:
+                self.request_logging.validate(container, state, enable_log_requests)
             if (
                 state is not None
                 and state != "running"
@@ -3141,6 +3338,7 @@ Examples:
                 dry_run=args.dry_run,
                 reuse_existing=not args.no_reuse_existing,
                 recreate=args.recreate,
+                enable_log_requests=enable_log_requests,
             )
             plan.append(
                 (
@@ -3172,6 +3370,14 @@ Examples:
             selected_models = [
                 self.models[name] for name in selected if name != "litellm"
             ]
+            if args.enable_log_requests and not selected_models:
+                raise ValueError(
+                    "--enable-log-requests requires at least one vLLM backend"
+                )
+            if args.disable_log_requests and not selected_models:
+                raise ValueError(
+                    "--disable-log-requests requires at least one vLLM backend"
+                )
             if args.recreate and not args.start:
                 raise ValueError(
                     "--recreate requires --start; use --start --recreate "
@@ -3467,6 +3673,7 @@ Examples:
             log_since = datetime.datetime.now(datetime.timezone.utc).isoformat(
                 timespec="microseconds"
             )
+            enable_log_requests = self._request_logging_enabled(args)
             self.start_vllm(
                 model,
                 StartOptions(
@@ -3475,6 +3682,7 @@ Examples:
                     dry_run=args.dry_run,
                     reuse_existing=not args.no_reuse_existing,
                     recreate=args.recreate,
+                    enable_log_requests=enable_log_requests,
                 ),
             )
 
@@ -3548,12 +3756,31 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--start", action="store_true", help="Start the model container"
     )
+    request_logging = parser.add_mutually_exclusive_group()
+    request_logging.add_argument(
+        "--request-logging",
+        "--enable-log-requests",
+        dest="enable_log_requests",
+        action="store_true",
+        help=(
+            "Enable vLLM per-request logging (requires --start; "
+            "may log prompt content)"
+        ),
+    )
+    request_logging.add_argument(
+        "--disable-log-requests",
+        action="store_true",
+        help=("Explicitly disable vLLM per-request logging (requires --start)"),
+    )
     parser.add_argument("--stop", action="store_true", help="Stop the model container")
     parser.add_argument("--ps", action="store_true", help="Show container status")
     parser.add_argument(
         "--status",
         action="store_true",
-        help="Show all configured models with Docker details and LiteLLM process status",
+        help=(
+            "Show all configured models with Docker details and LiteLLM process "
+            "status (must be used alone)"
+        ),
     )
     parser.add_argument(
         "--recreate",
@@ -3612,16 +3839,31 @@ def parse_args() -> argparse.Namespace:
     """Parse CLI arguments."""
     parser = _build_argument_parser()
     args = parser.parse_intermixed_args()
-    if args.status and not args.help:
-        if args.models or any(
-            value != parser.get_default(name)
-            for name, value in vars(args).items()
-            if name not in ("status", "models")
-        ):
-            parser.error("--status must be used alone")
-    if args.help:
-        args.status = False
+    if args.status and len(sys.argv[1:]) != 1:
+        parser.error("--status must be used alone")
     args.model = args.models[0] if args.models else None
+    if args.enable_log_requests and not args.help:
+        if not args.start:
+            parser.error("--enable-log-requests requires --start")
+        if args.stop or args.ps or args.list or args.show_log_path or args.clean_log:
+            parser.error("--enable-log-requests is only allowed with a start action")
+        if not args.models and args.group is None:
+            parser.error("--enable-log-requests requires a model or --group selection")
+        if args.models and all(
+            model.lower() in LITELLM_TARGETS for model in args.models
+        ):
+            parser.error("--enable-log-requests is only supported for vLLM backends")
+    if args.disable_log_requests and not args.help:
+        if not args.start:
+            parser.error("--disable-log-requests requires --start")
+        if args.stop or args.ps or args.list or args.show_log_path or args.clean_log:
+            parser.error("--disable-log-requests is only allowed with a start action")
+        if not args.models and args.group is None:
+            parser.error("--disable-log-requests requires a model or --group selection")
+        if args.models and all(
+            model.lower() in LITELLM_TARGETS for model in args.models
+        ):
+            parser.error("--disable-log-requests is only supported for vLLM backends")
     args.wait_for_startup = args.startup_timeout is not None
     if args.startup_timeout is None:
         args.startup_timeout = 900

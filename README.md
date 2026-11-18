@@ -2,6 +2,12 @@
 
 ![Hedgehog mascot](https://raw.githubusercontent.com/HarinezumIgel/RAG-LCC/main/docs/assets/AI_Igel.png)
 
+## Example starting group "rag" with pre-flight memory check
+![Project status](pics/start_group.png)
+
+## Status of running models
+![Project status](pics/Status.png)
+
 Manage a host-based [LiteLLM](https://github.com/BerriAI/litellm) proxy and
 [vLLM](https://github.com/vllm-project/vllm) backends in NVIDIA GPU-enabled Docker
 containers through one Python CLI. Clients use an OpenAI-compatible API; the
@@ -714,6 +720,18 @@ harinezumigel-llm-stack all --stop
   detached, without the vLLM readiness monitor.
 - `--startup-timeout SECONDS` sets a per-backend deadline (default 900).
   `--quiet` suppresses routine startup logs, not progress or failure diagnostics.
+- Request logging is off by default, including on recreation. Add
+  `--request-logging` to `--start` to enable vLLM per-request logs, including
+  resolved `SamplingParams` such as `temperature`, in the existing container
+  logs. `--enable-log-requests` is an alias; `--disable-log-requests` explicitly
+  selects the default. These options require a vLLM selection and do not affect
+  LiteLLM. Request logs may include prompt content.
+- Existing containers require a one-time `--start --recreate` to gain per-start
+  logging control (requires `rebuild: true`). After that, stop and start the
+  container with or without `--request-logging` to change the setting without
+  another recreation. If it is already running with the opposite setting, the
+  launcher refuses to start it rather than interrupting it. Use
+  `MODEL --show-log` or `MODEL --stream-log` to view logs.
 - Failure or timeout stops the sequence with a nonzero exit and diagnostics.
   Earlier starts remain running; later targets are not attempted. Ctrl+C
   stops monitoring/further starts and leaves backends running (exit 130).
@@ -763,6 +781,8 @@ harinezumigel-llm-stack all --stop
 
 Use `harinezumigel-llm-stack --help` for the full command help. A model's full
 name and its alias are interchangeable in CLI selections.
+`--status` must be used alone, without model selections or any other arguments
+(including `--help`).
 The supplied encoder aliases are `bge-m3-embedder` and `snowflake-embedder`;
 cross-encoder aliases are `bge-reranker` and `mmarco-reranker`. Each start
 command below selects one backend, without requiring a group or starting LiteLLM.
@@ -779,6 +799,7 @@ port, so similarly prefixed model names are not included in its logs or stops.
 | Start the BGE cross-encoder by CLI alias | `harinezumigel-llm-stack bge-reranker --start` |
 | Select several backends without a group | `harinezumigel-llm-stack mistral guard judge --start` |
 | Wait for one backend with bounded startup logs | `harinezumigel-llm-stack mistral --start --startup-logs` |
+| Enable per-request sampling logs | `harinezumigel-llm-stack mistral --start --request-logging` |
 | Use a different readiness deadline | `harinezumigel-llm-stack --group rag --start --startup-timeout 600` |
 | Preview selected recreation | `harinezumigel-llm-stack --group rag --start --recreate --dry-run` |
 | Read-only status of all configured models and LiteLLM | `harinezumigel-llm-stack --status` |
@@ -795,13 +816,23 @@ argument parser, including log paths, cleanup, status, and startup modifiers.
 Use `--status` alone to list every configured model, including models without
 containers, and the LiteLLM proxy's running/stopped state and PIDs for this
 configuration. Matching containers include `docker ps -a` details: name, state,
-ID, image, uptime/exit status, and published ports. Running model containers
-appear first, with LiteLLM status last. Unrelated containers are excluded.
-Running rows are green on supported interactive terminals (respecting
-`NO_COLOR` and the existing success-color setting).
-This command only reads status; it does not start, stop, or modify
-services. Process/container state does not imply API readiness. Docker query
-failures are reported as errors rather than as stopped models.
+ID, image, uptime/exit status, and published ports. Not-started models appear
+first; running or restarting models appear last, followed by LiteLLM. Unrelated
+containers are excluded.
+
+For running vLLM containers, readiness means an application startup-complete
+message was found in Docker logs since the container's latest start. For
+LiteLLM, the check matches timestamped JSON Uvicorn startup messages to the
+current proxy PID. If the current log cannot be matched (for example, logging
+is not in JSON format or logs were removed), readiness is `unknown`. A running
+service without a startup-complete message is `starting` when its startup log
+can be identified. Ready rows are green; starting and unknown rows are turquoise
+on supported terminals, respecting `NO_COLOR` and the existing color settings.
+
+The command only reads status and logs; it does not start, stop, or modify
+services. Log readiness indicates startup completed, not current API health.
+Docker status query failures are errors; inaccessible readiness logs produce a
+warning and `unknown` readiness.
 
 ### Check all configured models
 

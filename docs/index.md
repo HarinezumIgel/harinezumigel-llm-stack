@@ -6,6 +6,12 @@ title: Home
 # Local LLM workloads, one CLI
 
 ![Hedgehog mascot](https://raw.githubusercontent.com/HarinezumIgel/RAG-LCC/main/docs/assets/AI_Igel.png)
+## Example starting group "rag" with pre-flight memory check
+![Project status](assets/start_group.png)
+
+## Status of running models
+![Project status](assets/Status.png)
+
 
 Manage a host-based [LiteLLM](https://github.com/BerriAI/litellm) proxy and
 [vLLM](https://github.com/vllm-project/vllm) backends running in NVIDIA

@@ -224,6 +224,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNTIME_MODULES=(
     hls_litellm_security.py
     hls_preflight.py
+    hls_request_logging.py
     hls_selection.py
     hls_startup.py
     hls_terminal.py
@@ -555,6 +556,11 @@ echo "  Creating symlink: $INSTALL_DIR/src/harinezumigel-llm-stack.py → $SYMLI
 ln -s "$INSTALL_DIR/src/harinezumigel-llm-stack.py" "$SYMLINK_PATH"
 echo -e "${GREEN}✓${NC} Created symlink: $SYMLINK_PATH"
 echo "  Runtime modules are installed in $INSTALL_DIR/src; the checkout is not needed to run the command."
+echo "  Request logging is off by default; enable it with MODEL --start --request-logging."
+echo "  Existing vLLM containers need one recreation for per-start logging control:"
+echo "    harinezumigel-llm-stack MODEL --start --recreate"
+echo "  Recreation requires rebuild: true and replaces the selected container."
+echo "  Request logs may contain prompt content."
 echo
 
 # Check if ~/.local/bin is in PATH

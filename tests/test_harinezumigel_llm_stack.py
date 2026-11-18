@@ -2949,7 +2949,7 @@ class TestCLIProgramName(unittest.TestCase):
                 self.assertIn(f"{expected} — Unified LiteLLM", text)
                 commands = [
                     line.strip()
-                    for line in text.splitlines()
+                    for line in text.split("\nCLI options:\n", 1)[0].splitlines()
                     if " --" in line and not line.lstrip().startswith("-")
                 ]
                 self.assertGreaterEqual(len(commands), 29)
@@ -3073,6 +3073,8 @@ class TestStackStatus(unittest.TestCase):
         with (
             patch.object(sys, "argv", ["llm", "--status"]),
             patch.object(self.stack, "load_models") as load,
+            patch.object(self.stack, "_vllm_readiness", return_value="ready"),
+            patch.object(self.stack, "_litellm_readiness", return_value="ready"),
             patch.object(
                 harinezumigel_llm_stack,
                 "run_command",
@@ -3109,7 +3111,7 @@ class TestStackStatus(unittest.TestCase):
         self.assertNotIn("456", text.split("=== LiteLLM Status ===")[1])
         running_position = text.index("vllm-qwen_model-8001")
         for value in ("not created", "vllm-qwen_model-8002", "vllm-qwen_model_extra"):
-            self.assertLess(running_position, text.index(value))
+            self.assertGreater(running_position, text.index(value))
         self.assertGreater(
             text.index("=== LiteLLM Status ==="),
             text.index("vllm-qwen_model_extra-8003"),
@@ -3176,6 +3178,8 @@ class TestStackStatus(unittest.TestCase):
                     ),
                 ),
                 patch.object(self.stack, "_find_litellm_pids", return_value=["123"]),
+                patch.object(self.stack, "_vllm_readiness", return_value="ready"),
+                patch.object(self.stack, "_litellm_readiness", return_value="ready"),
                 redirect_stdout(output),
                 patch.object(output, "isatty", return_value=tty),
             ):
@@ -3204,10 +3208,181 @@ class TestStackStatus(unittest.TestCase):
                 return_value=MagicMock(returncode=0, stdout=""),
             ),
             patch.object(self.stack, "_find_litellm_pids", return_value=["123"]),
+            patch.object(self.stack, "_litellm_readiness", return_value="unknown"),
             redirect_stdout(output),
         ):
             self.stack.show_status()
         self.assertIn("LiteLLM: running", output.getvalue())
+
+    def test_starting_and_unknown_rows_are_turquoise_and_last(self) -> None:
+        containers = [
+            {
+                "Names": f"vllm-{name}-{port}",
+                "State": state,
+                "ID": "id",
+                "Image": "image",
+                "Status": state,
+                "Ports": "",
+            }
+            for name, port, state in (
+                ("qwen_model", 8001, "running"),
+                ("qwen_model_extra", 8002, "restarting"),
+            )
+        ]
+        output = io.StringIO()
+        with (
+            patch.dict(os.environ, {"TERM": "xterm"}, clear=True),
+            patch.object(
+                harinezumigel_llm_stack,
+                "run_command",
+                return_value=MagicMock(
+                    returncode=0,
+                    stdout="\n".join(json.dumps(item) for item in containers),
+                ),
+            ),
+            patch.object(self.stack, "_find_litellm_pids", return_value=["123"]),
+            patch.object(self.stack, "_vllm_readiness", return_value="starting"),
+            patch.object(self.stack, "_litellm_readiness", return_value="unknown"),
+            redirect_stdout(output),
+            patch.object(output, "isatty", return_value=True),
+        ):
+            self.stack.show_status()
+        lines = output.getvalue().splitlines()
+        missing = next(i for i, line in enumerate(lines) if "not created" in line)
+        for name in ("vllm-qwen_model-8001", "vllm-qwen_model_extra-8002"):
+            index = next(i for i, line in enumerate(lines) if name in line)
+            self.assertGreater(index, missing)
+            self.assertTrue(lines[index].startswith("\033[36m"))
+        proxy = next(line for line in lines if "LiteLLM: running" in line)
+        self.assertTrue(proxy.startswith("\033[36m"))
+        self.assertIn("(unknown)", proxy)
+
+    def test_vllm_readiness_uses_logs_since_current_container_start(self) -> None:
+        for text, code, expected in (
+            ("INFO: Application startup complete.\n", 0, "ready"),
+            ("loading model\n", 0, "starting"),
+            ("INFO: Application startup complete.\n", 1, "unknown"),
+        ):
+            with self.subTest(expected=expected):
+                process = MagicMock()
+                process.stdout = io.StringIO(text)
+                process.wait.return_value = code
+                context = MagicMock()
+                context.__enter__.return_value = process
+                with (
+                    patch.object(
+                        harinezumigel_llm_stack,
+                        "run_command",
+                        return_value=MagicMock(
+                            returncode=0, stdout="2026-11-11T14:00:00Z running\n"
+                        ),
+                    ),
+                    patch.object(
+                        harinezumigel_llm_stack.subprocess,
+                        "Popen",
+                        return_value=context,
+                    ) as popen,
+                    redirect_stdout(io.StringIO()),
+                ):
+                    self.assertEqual(self.stack._vllm_readiness("vllm-test"), expected)
+                self.assertEqual(
+                    popen.call_args.args[0],
+                    ["docker", "logs", "--since", "2026-11-11T14:00:00Z", "vllm-test"],
+                )
+
+    def test_vllm_readiness_detects_restart_during_log_read(self) -> None:
+        process = MagicMock()
+        process.stdout = io.StringIO("INFO: Application startup complete.\n")
+        process.wait.return_value = 0
+        context = MagicMock()
+        context.__enter__.return_value = process
+        with (
+            patch.object(
+                harinezumigel_llm_stack,
+                "run_command",
+                side_effect=[
+                    MagicMock(returncode=0, stdout="old-start running"),
+                    MagicMock(returncode=0, stdout="new-start running"),
+                ],
+            ),
+            patch.object(
+                harinezumigel_llm_stack.subprocess, "Popen", return_value=context
+            ),
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            self.assertEqual(self.stack._vllm_readiness("vllm-test"), "unknown")
+        self.assertIn("state changed", output.getvalue())
+
+    def test_litellm_readiness_rejects_old_runs_and_other_pids(self) -> None:
+        now = 1_800_000_000.0
+        stamp = harinezumigel_llm_stack.datetime.datetime.fromtimestamp(
+            now - 5, harinezumigel_llm_stack.datetime.timezone.utc
+        ).isoformat()
+        old_stamp = harinezumigel_llm_stack.datetime.datetime.fromtimestamp(
+            now - 100, harinezumigel_llm_stack.datetime.timezone.utc
+        ).isoformat()
+
+        def _entry(message: str, timestamp: str = stamp) -> str:
+            return json.dumps(
+                {
+                    "component": "uvicorn.error",
+                    "message": message,
+                    "timestamp": timestamp,
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs = Path(temp_dir) / "logs"
+            logs.mkdir()
+            path = logs / "litellm_20261111_100000.log"
+            with (
+                patch.object(harinezumigel_llm_stack, "INSTALLED_BASE", Path(temp_dir)),
+                patch.object(harinezumigel_llm_stack.time, "time", return_value=now),
+                patch.object(
+                    harinezumigel_llm_stack,
+                    "run_command",
+                    return_value=MagicMock(returncode=0, stdout="10\n"),
+                ),
+            ):
+                for content, expected in (
+                    (
+                        [
+                            _entry("Started server process [123]", old_stamp),
+                            _entry("Application startup complete."),
+                        ],
+                        "unknown",
+                    ),
+                    (
+                        [
+                            _entry("Started server process [456]"),
+                            _entry("Application startup complete."),
+                        ],
+                        "unknown",
+                    ),
+                    ([_entry("Started server process [123]")], "starting"),
+                    (
+                        [
+                            _entry("Started server process [123]"),
+                            _entry("Application startup complete."),
+                        ],
+                        "ready",
+                    ),
+                    (
+                        [
+                            _entry("Started server process [123]"),
+                            _entry("Application startup complete."),
+                            json.dumps({"event": "litellm_start_attempt"}),
+                            _entry("Started server process [123]"),
+                        ],
+                        "starting",
+                    ),
+                ):
+                    with self.subTest(expected=expected, content=content):
+                        path.write_text("\n".join(content), encoding="utf-8")
+                        os.utime(path, (now, now))
+                        self.assertEqual(
+                            self.stack._litellm_readiness(["123"]), expected
+                        )
 
     def test_status_query_errors_are_not_reported_as_stopped(self) -> None:
         cases = [
@@ -3276,6 +3451,18 @@ class TestCLIParseArgs(unittest.TestCase):
             ["--show-log"],
             ["--stream-log"],
             ["--startup-logs"],
+            ["--enable-log-requests"],
+            ["--quiet"],
+            ["--startup-timeout", "900"],
+            ["--no-reuse-existing"],
+            ["--show-log-path"],
+            ["--follow"],
+            ["--tail", "all"],
+            ["--tail=all"],
+            ["--dry-run"],
+            ["--help"],
+            ["--status"],
+            ["--"],
             ["--group", "rag"],
             ["qwen"],
             ["litellm"],
@@ -3290,11 +3477,17 @@ class TestCLIParseArgs(unittest.TestCase):
                 harinezumigel_llm_stack.parse_args()
             self.assertEqual(error.exception.code, 2)
 
-    def test_status_help_does_not_query_status(self) -> None:
-        with patch.object(sys, "argv", ["llm", "--status", "--help"]):
-            args = harinezumigel_llm_stack.parse_args()
-        self.assertTrue(args.help)
-        self.assertFalse(args.status)
+    def test_status_rejects_preceding_options(self) -> None:
+        for extra in (["--help"], ["--tail", "all"], ["qwen"]):
+            with (
+                self.subTest(extra=extra),
+                patch.object(sys, "argv", ["llm", *extra, "--status"]),
+                redirect_stderr(io.StringIO()) as output,
+                self.assertRaises(SystemExit) as error,
+            ):
+                harinezumigel_llm_stack.parse_args()
+            self.assertEqual(error.exception.code, 2)
+            self.assertIn("--status must be used alone", output.getvalue())
 
     def test_litellm_missing_action_lists_stream_log(self) -> None:
         """The LiteLLM action error should list --stream-log as a valid action."""

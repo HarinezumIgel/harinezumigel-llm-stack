@@ -189,7 +189,7 @@ class TestInstallerConfig(unittest.TestCase):
             )
             link = home / ".local" / "bin" / "harinezumigel-llm-stack"
             for _ in range(2):
-                subprocess.run(
+                result = subprocess.run(
                     [
                         "bash",
                         "-c",
@@ -202,8 +202,12 @@ class TestInstallerConfig(unittest.TestCase):
                     capture_output=True,
                     text=True,
                 )
+                self.assertIn("--start --request-logging", result.stdout)
+                self.assertIn("--start --recreate", result.stdout)
+                self.assertIn("Request logs may contain prompt content", result.stdout)
                 installed = root / "installed" / "src"
                 launcher = installed / "harinezumigel-llm-stack.py"
+                self.assertIn("hls_request_logging.py", RUNTIME_MODULES.split())
                 self.assertEqual(link.resolve(), launcher)
                 self.assertTrue(launcher.stat().st_mode & 0o100)
                 for name in RUNTIME_MODULES.split():
@@ -212,6 +216,14 @@ class TestInstallerConfig(unittest.TestCase):
                         (PROJECT_DIR / "src" / name).read_bytes(),
                     )
                 self.assertFalse((installed / "fix_settings.py").exists())
+                subprocess.run(
+                    [sys.executable, "-c", "import hls_request_logging"],
+                    cwd=root,
+                    env={**os.environ, "PYTHONPATH": str(installed)},
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
 
     def test_local_helper_retargets_link_and_preserves_regular_files(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

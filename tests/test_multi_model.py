@@ -10,7 +10,7 @@ import sys
 import tempfile
 import threading
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -79,6 +79,8 @@ class TestMultiModel(unittest.TestCase):
         patch.object(self.stack, "_docker_port_in_use", return_value=False).start()
         patch.object(app, "port_in_use", return_value=False).start()
         patch.object(self.stack, "_build_vllm_command", return_value=[]).start()
+        patch.object(self.stack.request_logging, "validate").start()
+        patch.object(self.stack.request_logging, "set_mode").start()
         self.vram_check = patch.object(
             self.stack.preflight_checks, "check_gpu_memory"
         ).start()
@@ -937,6 +939,353 @@ class TestMultiModel(unittest.TestCase):
     def test_single_model_startup_logs_opt_in(self):
         self.run_command("first", "--start", "--startup-logs")
         self.monitor.assert_called_once()
+
+    def test_request_logging_requires_start(self):
+        for selection in ((), ("first",), ("--group", "rag"), ("all",), ("litellm",)):
+            for action in ((), ("--stop",), ("--show-log",), ("--list",)):
+                with (
+                    self.subTest(selection=selection, action=action),
+                    redirect_stderr(io.StringIO()) as errors,
+                    self.assertRaises(SystemExit) as error,
+                ):
+                    self.args(*selection, *action, "--enable-log-requests")
+                self.assertEqual(error.exception.code, 2)
+                self.assertIn(
+                    "--enable-log-requests requires --start", errors.getvalue()
+                )
+
+    def test_request_logging_rejects_non_backend_start_actions(self):
+        for selection in (
+            ("--start",),
+            ("litellm", "--start"),
+            ("first", "--start", "--stop"),
+            ("first", "--start", "--ps"),
+            ("first", "--start", "--list"),
+            ("first", "--start", "--show-log-path"),
+            ("first", "--start", "--clean-log"),
+        ):
+            with (
+                self.subTest(selection=selection),
+                redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit) as error,
+            ):
+                self.args(*selection, "--enable-log-requests")
+            self.assertEqual(error.exception.code, 2)
+
+    def test_request_logging_is_forwarded_to_selected_backends(self):
+        for selection in (
+            ("first",),
+            ("first", "--startup-logs"),
+            ("first", "second"),
+            ("--group", "rag"),
+            ("first", "litellm"),
+            ("first", "--recreate"),
+        ):
+            with self.subTest(selection=selection):
+                self.start.reset_mock()
+                self.run_command(
+                    *selection, "--start", "--enable-log-requests", "--dry-run"
+                )
+                self.assertTrue(self.start.called)
+                for call in self.start.call_args_list:
+                    self.assertTrue(call.args[1].enable_log_requests)
+
+    def test_request_logging_defaults_off_for_all_starts(self):
+        for args, expected in (
+            (("first", "--start"), False),
+            (("first", "--start", "--recreate"), False),
+            (("--group", "rag", "--start", "--recreate"), False),
+        ):
+            with self.subTest(args=args):
+                self.start.reset_mock()
+                self.run_command(*args, "--dry-run")
+                self.assertTrue(self.start.called)
+                self.assertTrue(
+                    all(
+                        call.args[1].enable_log_requests is expected
+                        for call in self.start.call_args_list
+                    )
+                )
+
+    def test_request_logging_alias_and_conflicts(self):
+        args = self.args("first", "--start", "--request-logging")
+        self.assertTrue(args.enable_log_requests)
+        self.run_command("first", "--start", "--request-logging", "--dry-run")
+        self.assertTrue(self.start.call_args.args[1].enable_log_requests)
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            self.args("first", "--start", "--request-logging", "--disable-log-requests")
+
+    def test_request_logging_shell_honors_each_mode(self):
+        mode_file = self.root / "logging-mode"
+        script = app.RequestLogging.STARTUP.replace(
+            app.RequestLogging.FILE, str(mode_file)
+        )
+        command = [
+            "sh",
+            "-c",
+            script,
+            "hls-request-logging",
+            "off",
+            "printf",
+            "%s\\n",
+            "model",
+        ]
+        for content, expected in (
+            (None, "model\n"),
+            ("on\n", "model\n--enable-log-requests\n"),
+            ("off\n", "model\n"),
+            ("invalid\n", None),
+        ):
+            with self.subTest(content=content):
+                if content is not None:
+                    mode_file.write_text(content, encoding="ascii")
+                result = subprocess.run(command, capture_output=True, text=True)
+                if expected is None:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("Invalid request logging", result.stderr)
+                else:
+                    self.assertEqual(result.returncode, 0)
+                    self.assertEqual(result.stdout, expected)
+
+    def test_request_logging_inspects_actual_running_process(self):
+        inspect = subprocess.CompletedProcess([], 0, "1\n", "")
+        for active in (False, True):
+            for requested in (False, True):
+                with (
+                    self.subTest(active=active, requested=requested),
+                    patch.object(
+                        self.stack.request_logging,
+                        "_run_command",
+                        side_effect=[
+                            inspect,
+                            subprocess.CompletedProcess(
+                                [], 0, "on\n" if active else "off\n", ""
+                            ),
+                        ],
+                    ),
+                ):
+                    if active == requested:
+                        app.RequestLogging.validate(
+                            self.stack.request_logging,
+                            "vllm-model-8101",
+                            "running",
+                            requested,
+                        )
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "stop it"):
+                            app.RequestLogging.validate(
+                                self.stack.request_logging,
+                                "vllm-model-8101",
+                                "running",
+                                requested,
+                            )
+
+    def test_legacy_stopped_container_requires_one_time_recreation(self):
+        with (
+            patch.object(
+                self.stack.request_logging,
+                "_run_command",
+                return_value=subprocess.CompletedProcess([], 0, "<no value>\n", ""),
+            ),
+            self.assertRaisesRegex(RuntimeError, "--recreate"),
+        ):
+            app.RequestLogging.validate(
+                self.stack.request_logging, "vllm-model-8101", "exited", False
+            )
+
+    def test_request_logging_inspection_errors_are_not_ignored(self):
+        for responses in (
+            [subprocess.CompletedProcess([], 1, "", "inspect failed")],
+            [
+                subprocess.CompletedProcess([], 0, "1\n", ""),
+                subprocess.CompletedProcess([], 1, "", "exec failed"),
+            ],
+            [
+                subprocess.CompletedProcess([], 0, "1\n", ""),
+                subprocess.CompletedProcess([], 0, "unexpected\n", ""),
+            ],
+        ):
+            with (
+                self.subTest(responses=responses),
+                patch.object(
+                    self.stack.request_logging, "_run_command", side_effect=responses
+                ),
+                self.assertRaises(RuntimeError),
+            ):
+                app.RequestLogging.validate(
+                    self.stack.request_logging, "vllm-model-8101", "running", False
+                )
+
+    def test_batch_request_logging_mismatch_blocks_every_launch(self):
+        with (
+            patch.object(self.stack, "_docker_container_state", return_value="running"),
+            patch.object(
+                self.stack.request_logging,
+                "validate",
+                side_effect=RuntimeError("logging mismatch"),
+            ),
+            self.assertRaises(SystemExit),
+        ):
+            self.run_command("--group", "rag", "--start")
+        self.start.assert_not_called()
+        self.monitor.assert_not_called()
+        self.assertIn("logging mismatch", self.output.getvalue())
+
+    def test_setting_request_logging_copies_mode_and_dry_run_is_read_only(self):
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                copied = []
+
+                def _copy(command, **_kwargs):
+                    copied.append(Path(command[2]).read_text(encoding="ascii"))
+                    self.assertEqual(
+                        command[3], f"vllm-model-8101:{app.RequestLogging.FILE}"
+                    )
+                    return subprocess.CompletedProcess(command, 0, "", "")
+
+                with patch.object(
+                    self.stack.request_logging, "_run_command", side_effect=_copy
+                ) as run:
+                    app.RequestLogging.set_mode(
+                        self.stack.request_logging,
+                        "vllm-model-8101",
+                        enabled,
+                        dry_run=True,
+                    )
+                    run.assert_not_called()
+                    app.RequestLogging.set_mode(
+                        self.stack.request_logging,
+                        "vllm-model-8101",
+                        enabled,
+                        dry_run=False,
+                    )
+                self.assertEqual(copied, ["on\n" if enabled else "off\n"])
+
+    def test_request_logging_can_be_disabled_for_recreation(self):
+        for selection in (("first",), ("--group", "rag")):
+            with self.subTest(selection=selection):
+                self.start.reset_mock()
+                self.run_command(
+                    *selection,
+                    "--start",
+                    "--recreate",
+                    "--disable-log-requests",
+                    "--dry-run",
+                )
+                self.assertTrue(self.start.called)
+                self.assertTrue(
+                    all(
+                        not call.args[1].enable_log_requests
+                        for call in self.start.call_args_list
+                    )
+                )
+
+    def test_disabling_request_logging_requires_start(self):
+        for args in (("first", "--disable-log-requests"),):
+            with (
+                self.subTest(args=args),
+                redirect_stderr(io.StringIO()) as errors,
+                self.assertRaises(SystemExit) as error,
+            ):
+                self.args(*args)
+            self.assertEqual(error.exception.code, 2)
+            self.assertIn(
+                "--disable-log-requests requires --start",
+                errors.getvalue(),
+            )
+
+    def test_request_logging_rejects_litellm_only_group(self):
+        self.data["model_groups"]["proxy"] = ["litellm"]
+        self.write_config()
+        with self.assertRaises(SystemExit) as error:
+            self.run_command("--group", "proxy", "--start", "--enable-log-requests")
+        self.assertEqual(error.exception.code, 1)
+        self.assertIn("requires at least one vLLM backend", self.output.getvalue())
+        self.start.assert_not_called()
+        self.start_litellm.assert_not_called()
+        with redirect_stdout(self.output), self.assertRaises(SystemExit) as error:
+            self.run_command(
+                "--group",
+                "proxy",
+                "--start",
+                "--recreate",
+                "--disable-log-requests",
+            )
+        self.assertEqual(error.exception.code, 1)
+        self.assertIn("requires at least one vLLM backend", self.output.getvalue())
+        self.start.assert_not_called()
+        self.start_litellm.assert_not_called()
+
+    def test_request_logging_reaches_docker_command_and_dry_run(self):
+        model = self.stack.models["model_a"]
+        runtime = self.stack._resolve_runtime_settings(model)
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                command = app.LLMStack._build_vllm_command(
+                    self.stack,
+                    model,
+                    self.root / model.name,
+                    8101,
+                    runtime,
+                    enable_log_requests=enabled,
+                )
+                index = command.index("hls-request-logging")
+                self.assertEqual(command[index + 1], "on" if enabled else "off")
+                self.assertIn(app.RequestLogging.STARTUP, command)
+                self.assertNotIn("--enable-log-requests", command)
+                options = app.StartOptions(
+                    port=8101,
+                    runtime=runtime,
+                    dry_run=True,
+                    reuse_existing=True,
+                    recreate=False,
+                    enable_log_requests=enabled,
+                )
+                with (
+                    patch.object(
+                        self.stack, "_build_vllm_command", return_value=command
+                    ) as build,
+                    patch.object(self.stack.preflight_checks, "check_nvidia_driver"),
+                    patch.object(app, "run_command") as run,
+                    redirect_stdout(io.StringIO()) as output,
+                ):
+                    app.LLMStack.start_vllm(self.stack, model, options)
+                self.assertEqual(build.call_args.kwargs["enable_log_requests"], enabled)
+                self.assertIn("hls-request-logging", output.getvalue())
+                run.assert_not_called()
+
+    def test_request_logging_refuses_reuse_when_validation_fails(self):
+        model = self.stack.models["model_a"]
+        options = app.StartOptions(
+            port=8101,
+            runtime=self.stack._resolve_runtime_settings(model),
+            dry_run=True,
+            reuse_existing=True,
+            recreate=False,
+            enable_log_requests=True,
+        )
+        for state in ("running", "exited"):
+            with (
+                self.subTest(state=state),
+                patch.object(self.stack, "_docker_container_state", return_value=state),
+                patch.object(
+                    self.stack.request_logging,
+                    "validate",
+                    side_effect=RuntimeError("logging mismatch"),
+                ),
+                redirect_stdout(io.StringIO()) as output,
+                self.assertRaises(SystemExit),
+            ):
+                app.LLMStack.start_vllm(self.stack, model, options)
+            self.assertIn("logging mismatch", output.getvalue())
+
+    def test_request_logging_is_documented_in_help(self):
+        help_text = app._build_argument_parser().format_help()
+        self.assertIn("--request-logging", help_text)
+        self.assertIn("--enable-log-requests", help_text)
+        self.assertIn("--disable-log-requests", help_text)
+        self.assertIn("requires --start", help_text)
+        self.assertIn("mistral --start --request-logging", self.stack.generate_help())
 
     def test_single_model_explicit_timeout_enables_monitoring(self):
         self.run_command("first", "--start", "--startup-timeout", "12")

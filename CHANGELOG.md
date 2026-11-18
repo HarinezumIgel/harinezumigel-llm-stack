@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [11/18/2026 Revision 125]
+
+### Added
+- Add startup readiness to `--status` for running vLLM containers and the
+  LiteLLM proxy, distinguishing ready, starting, and unknown based on logs from
+  the current run. Warn when readiness logs cannot be identified; readiness
+  indicates startup completion, not current API health.
+- Add opt-in per-start vLLM request logging with `--request-logging`
+  (`--enable-log-requests` alias) and an explicit disable option. Logging
+  defaults off; existing containers need one `--start --recreate` (with
+  `rebuild: true`) to gain per-start control. Warn that request logs may contain
+  prompt content.
+- Add installer guidance and regression coverage for request logging and
+  status readiness.
+- Add the project status image to the README and documentation landing page.
+
 ## [11/10/2026 Revision 114]
 
 ### Added
