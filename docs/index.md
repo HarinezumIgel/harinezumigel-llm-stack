@@ -7,13 +7,13 @@ title: Home
 
 ![Hedgehog mascot](https://raw.githubusercontent.com/HarinezumIgel/RAG-LCC/main/docs/assets/AI_Igel.png)
 ## Example starting group "rag" with pre-flight memory check
-![Project status](../pics/start_group.png)
+![Project status](https://raw.githubusercontent.com/HarinezumIgel/harinezumigel-llm-stack/main/pics/start_group.png)
 
 ## Status of running models
-![Project status](../pics/Status.png)
+![Project status](https://raw.githubusercontent.com/HarinezumIgel/harinezumigel-llm-stack/main/pics/Status.png)
 
 ## Stopping group rag
-![Project status](../pics/Stop.png)
+![Project status](https://raw.githubusercontent.com/HarinezumIgel/harinezumigel-llm-stack/main/pics/Stop.png)
 
 Manage a host-based [LiteLLM](https://github.com/BerriAI/litellm) proxy and
 [vLLM](https://github.com/vllm-project/vllm) backends running in NVIDIA
