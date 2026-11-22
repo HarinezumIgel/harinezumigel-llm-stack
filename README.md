@@ -8,6 +8,9 @@
 ## Status of running models
 ![Project status](pics/Status.png)
 
+## Stopping grou rag
+![Project status](pics/Stop.png)
+
 Manage a host-based [LiteLLM](https://github.com/BerriAI/litellm) proxy and
 [vLLM](https://github.com/vllm-project/vllm) backends in NVIDIA GPU-enabled Docker
 containers through one Python CLI. Clients use an OpenAI-compatible API; the
