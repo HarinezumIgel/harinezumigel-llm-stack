@@ -8,7 +8,7 @@
 ## Status of running models
 ![Project status](pics/Status.png)
 
-## Stopping grou rag
+## Stopping group rag
 ![Project status](pics/Stop.png)
 
 Manage a host-based [LiteLLM](https://github.com/BerriAI/litellm) proxy and
