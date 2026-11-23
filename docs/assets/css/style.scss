@@ -1,0 +1,60 @@
+---
+---
+
+@import "{{ site.theme }}";
+
+body {
+  background-color: #000;
+  color: #e6e6e6;
+}
+
+.page-header {
+  display: none;
+}
+
+a {
+  color: #8ab4f8;
+}
+
+.main-content {
+  h1, h2, h3, h4, h5, h6 {
+    color: #f2f2f2;
+  }
+
+  code,
+  pre,
+  pre > code {
+    color: #e6e6e6;
+  }
+
+  code,
+  pre,
+  .highlight {
+    background-color: #1b1b1b;
+  }
+
+  pre {
+    border-color: #444;
+  }
+
+  pre > code {
+    background: transparent;
+  }
+
+  .highlight span {
+    color: inherit;
+    background-color: transparent;
+  }
+
+  blockquote,
+  .site-footer-credits {
+    color: #bdbdbd;
+  }
+
+  blockquote,
+  table th,
+  table td,
+  .site-footer {
+    border-color: #444;
+  }
+}
