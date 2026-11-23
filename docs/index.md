@@ -5,7 +5,32 @@ title: Home
 
 # Local LLM workloads, one CLI
 
-![Hedgehog mascot](https://raw.githubusercontent.com/HarinezumIgel/RAG-LCC/main/docs/assets/AI_Igel.png)
+<p align="center">
+  <img src="https://raw.githubusercontent.com/HarinezumIgel/RAG-LCC/main/docs/assets/AI_Igel.png" alt="Hedgehog mascot" width="160">
+</p>
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/HarinezumIgel/harinezumigel-llm-stack/blob/main/LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Built with Bash](https://img.shields.io/badge/Built%20with-Bash-4EAA25?logo=gnubash&logoColor=white)](https://www.gnu.org/software/bash/)
+[![Built with Docker](https://img.shields.io/badge/Built%20with-Docker-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
+[![Powered by NVIDIA](https://img.shields.io/badge/Powered%20by-NVIDIA-76B900?logo=nvidia&logoColor=white)](https://www.nvidia.com/)
+[![Built with vLLM](https://img.shields.io/badge/Built%20with-vLLM-7C3AED)](https://github.com/vllm-project/vllm)
+[![Built with LiteLLM](https://img.shields.io/badge/Built%20with-LiteLLM-FF6F61)](https://github.com/BerriAI/litellm)
+[![Built with PyYAML](https://img.shields.io/badge/Built%20with-PyYAML-2C8EBB)](https://github.com/yaml/pyyaml)
+
+## Contents
+
+- [Screenshots](#example-starting-group-rag-with-pre-flight-memory-check)
+- [RAG use case](#use-case-experiment-with-rag-encoders-and-rerankers)
+- [How the components fit together](#how-the-components-fit-together)
+- [LiteLLM security incident](#litellm-october-2026-incident)
+- [Get started](#get-started)
+- [Day-to-day commands](#day-to-day-commands)
+- [Preflight checks](#preflight-checks)
+- [Project resources](#project-resources)
+- [Credits](#credits)
+- [Important](#important)
+
 ## Example starting group "rag" with pre-flight memory check
 ![Project status](https://raw.githubusercontent.com/HarinezumIgel/harinezumigel-llm-stack/main/pics/start_group.png)
 

@@ -1,6 +1,32 @@
 # harinezumigel-llm-stack
 
-![Hedgehog mascot](https://raw.githubusercontent.com/HarinezumIgel/RAG-LCC/main/docs/assets/AI_Igel.png)
+<p align="center">
+  <img src="https://raw.githubusercontent.com/HarinezumIgel/RAG-LCC/main/docs/assets/AI_Igel.png" alt="Hedgehog mascot" width="160">
+</p>
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Built with Bash](https://img.shields.io/badge/Built%20with-Bash-4EAA25?logo=gnubash&logoColor=white)](https://www.gnu.org/software/bash/)
+[![Built with Docker](https://img.shields.io/badge/Built%20with-Docker-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
+[![Powered by NVIDIA](https://img.shields.io/badge/Powered%20by-NVIDIA-76B900?logo=nvidia&logoColor=white)](https://www.nvidia.com/)
+[![Built with vLLM](https://img.shields.io/badge/Built%20with-vLLM-7C3AED)](https://github.com/vllm-project/vllm)
+[![Built with LiteLLM](https://img.shields.io/badge/Built%20with-LiteLLM-FF6F61)](https://github.com/BerriAI/litellm)
+[![Built with PyYAML](https://img.shields.io/badge/Built%20with-PyYAML-2C8EBB)](https://github.com/yaml/pyyaml)
+
+## Contents
+
+- [Screenshots](#example-starting-group-rag-with-pre-flight-memory-check)
+- [LiteLLM security incident](#litellm-october-2026-incident)
+- [RAG use case](#use-case-experiment-with-rag-encoders-and-rerankers)
+- [Components at a glance](#components-at-a-glance)
+- [Installation and requirements](#install-from-any-checkout-location)
+- [Configure the deployment](#configure-the-deployment)
+- [Run and switch workloads](#run-and-switch-workloads)
+- [CLI reference](#cli-reference)
+- [Troubleshooting and safety](#troubleshooting-and-safety)
+- [Development and project information](#development-and-project-information)
+- [Credits](#credits)
+- [Disclaimer](#disclaimer)
 
 ## Example starting group "rag" with pre-flight memory check
 ![Project status](pics/start_group.png)
